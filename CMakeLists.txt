@@ -51,6 +51,8 @@ set(ORT_ROOT "${onnxruntime_SOURCE_DIR}")
 # / kokoro) and pull heavy deps (OpenCV; DLIB + an FFT backend). Revisit only if
 # ort-server ever needs to run a non-text graph.
 set(OCOS_ENABLE_CTEST OFF CACHE BOOL "" FORCE)
+# The tokenizer C API (OrtxCreateTokenizer/OrtxTokenize) used by src/main.cpp:
+set(OCOS_ENABLE_C_API ON CACHE BOOL "" FORCE)
 # In scope — text ops:
 set(OCOS_ENABLE_SPM_TOKENIZER ON CACHE BOOL "" FORCE)
 set(OCOS_ENABLE_BERT_TOKENIZER ON CACHE BOOL "" FORCE)
@@ -72,7 +74,9 @@ FetchContent_MakeAvailable(ortextensions)
 
 # --- Target -----------------------------------------------------------------
 add_executable(ort-server src/main.cpp)
-target_include_directories(ort-server PRIVATE "${ORT_ROOT}/include")
+target_include_directories(ort-server PRIVATE
+  "${ORT_ROOT}/include"
+  "${ortextensions_SOURCE_DIR}/include")
 target_link_libraries(ort-server PRIVATE
   httplib::httplib
   nlohmann_json::nlohmann_json
