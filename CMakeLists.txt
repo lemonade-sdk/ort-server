@@ -6,8 +6,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Pin these; bump deliberately. ORT is fetched as a prebuilt archive per platform
 # (CPU EP only for v1); onnxruntime-extensions provides the in-graph tokenizer ops.
-set(ONNXRUNTIME_VERSION "1.20.1" CACHE STRING "ONNX Runtime version")
-set(ORT_EXTENSIONS_TAG   "v0.13.0" CACHE STRING "onnxruntime-extensions git tag")
+set(ONNXRUNTIME_VERSION "1.27.0" CACHE STRING "ONNX Runtime version")
+set(ORT_EXTENSIONS_TAG   "v0.14.0" CACHE STRING "onnxruntime-extensions git tag")
 
 include(FetchContent)
 
