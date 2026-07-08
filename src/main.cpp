@@ -105,9 +105,14 @@ public:
         const char* strs[] = {text.c_str()};
         input.FillStringTensor(strs, 1);
 
-        auto out_names = session_.GetOutputNames();
+        Ort::AllocatorWithDefaultOptions out_alloc;
+        size_t out_count = session_.GetOutputCount();
+        std::vector<Ort::AllocatedStringPtr> out_name_ptrs;
         std::vector<const char*> on;
-        for (auto& s : out_names) on.push_back(s.c_str());
+        for (size_t i = 0; i < out_count; ++i) {
+            out_name_ptrs.push_back(session_.GetOutputNameAllocated(i, out_alloc));
+            on.push_back(out_name_ptrs.back().get());
+        }
         auto outputs = session_.Run(Ort::RunOptions{nullptr}, in_names, &input, 1, on.data(), on.size());
 
         float* logits = outputs[0].GetTensorMutableData<float>();
