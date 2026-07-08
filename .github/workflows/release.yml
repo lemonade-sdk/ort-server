@@ -28,6 +28,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Pin CMake: runner images ship inconsistent versions (some CMake 4.x,
+      # which fatally rejects the old cmake_minimum_required in sentencepiece /
+      # protobuf / etc.). 3.31 accepts them (deprecation warning only).
+      - uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: "3.31.6"
+
       - name: Resolve version
         id: ver
         shell: bash
@@ -37,7 +44,7 @@ jobs:
           echo "version=$V" >> "$GITHUB_OUTPUT"
 
       - name: Configure
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
         run: cmake --build build --config Release --parallel
