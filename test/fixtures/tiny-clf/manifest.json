@@ -1,0 +1,9 @@
+{
+  "task": "text-classification",
+  "id2label": {
+    "0": "LABEL_0",
+    "1": "LABEL_1"
+  },
+  "score_normalization": "softmax",
+  "token_aggregation": null
+}

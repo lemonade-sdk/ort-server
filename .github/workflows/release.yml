@@ -61,6 +61,29 @@ jobs:
       - name: Build
         run: cmake --build build --config Release --parallel
 
+      # Prove the binary actually classifies: run it against a tiny committed
+      # fixture (model.onnx + tokenizer.json + manifest.json) and assert real
+      # label scores come back.
+      - name: Smoke test /classify
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then BIN="build/Release/ort-server.exe"; else BIN="build/ort-server"; fi
+          "$BIN" --model-path test/fixtures/tiny-clf --port 8123 &
+          SRV=$!
+          ok=""
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:8123/health >/dev/null; then ok=1; break; fi
+            sleep 1
+          done
+          [ -n "$ok" ] || { echo "server did not become ready"; kill $SRV 2>/dev/null || true; exit 1; }
+          RESP=$(curl -sf -X POST http://127.0.0.1:8123/classify \
+                 -H "Content-Type: application/json" -d '{"text":"hello world"}')
+          echo "classify response: $RESP"
+          kill $SRV 2>/dev/null || true
+          echo "$RESP" | grep -q '"labels"' || { echo "FAIL: no labels field"; exit 1; }
+          echo "$RESP" | grep -q 'LABEL_' || { echo "FAIL: expected label missing"; exit 1; }
+          echo "smoke test passed"
+
       - name: Stage
         shell: bash
         run: |
