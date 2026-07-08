@@ -25,17 +25,21 @@ jobs:
           - { os: ubuntu-24.04-arm, platform: linux-arm64, archive: tar }
           - { os: macos-latest,     platform: macos-arm64, archive: tar }
     runs-on: ${{ matrix.os }}
-    # On the native arm64 runner, cc-rs (via the Rust onig_sys crate) looks for a
-    # cross-prefixed "aarch64-unknown-linux-gnu-gcc"; point it at the native gcc.
-    # Ignored on the other targets.
-    env:
-      CC_aarch64_unknown_linux_gnu: gcc
-      CXX_aarch64_unknown_linux_gnu: g++
     steps:
       - uses: actions/checkout@v4
 
       # tokenizers-cpp builds a small Rust static lib via cargo.
       - uses: dtolnay/rust-toolchain@stable
+
+      # On the native arm64 runner, the Rust onig_sys crate's cc-rs build looks
+      # for a cross-prefixed "aarch64-unknown-linux-gnu-gcc"; give it exactly that
+      # name as a symlink to the native gcc.
+      - name: arm64 cc shim
+        if: matrix.platform == 'linux-arm64'
+        shell: bash
+        run: |
+          sudo ln -sf "$(command -v gcc)" /usr/local/bin/aarch64-unknown-linux-gnu-gcc
+          sudo ln -sf "$(command -v g++)" /usr/local/bin/aarch64-unknown-linux-gnu-g++
 
       - name: Resolve version
         id: ver
