@@ -1,0 +1,82 @@
+name: release
+
+# CPU EP only → all builds run on GitHub-hosted runners (no self-hosted/GPU).
+# Push a v* tag to build per-platform archives and attach them to the release.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version string for artifact names (e.g. 0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest,   platform: windows-x64, archive: zip }
+          - { os: ubuntu-latest,    platform: linux-x64,   archive: tar }
+          - { os: ubuntu-24.04-arm, platform: linux-arm64, archive: tar }
+          - { os: macos-latest,     platform: macos-arm64, archive: tar }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          V="${{ github.event.inputs.version }}"
+          [ -z "$V" ] && V="${GITHUB_REF_NAME#v}"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Stage
+        shell: bash
+        run: |
+          mkdir -p stage
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp build/Release/ort-server.exe stage/ || cp build/ort-server.exe stage/
+            cp build/Release/onnxruntime.dll stage/ 2>/dev/null || true
+          else
+            cp build/ort-server stage/
+            cp build/_deps/onnxruntime-src/lib/libonnxruntime.* stage/ 2>/dev/null || true
+          fi
+
+      - name: Package
+        shell: bash
+        run: |
+          NAME="ort-server-${{ steps.ver.outputs.version }}-${{ matrix.platform }}"
+          cd stage
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            7z a "../$NAME.zip" ./*
+          else
+            tar -czf "../$NAME.tar.gz" ./*
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ort-server-${{ matrix.platform }}
+          path: ort-server-*.*
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: dist, merge-multiple: true }
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*

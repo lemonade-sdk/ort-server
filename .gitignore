@@ -1,0 +1,5 @@
+build/
+stage/
+dist/
+*.zip
+*.tar.gz
