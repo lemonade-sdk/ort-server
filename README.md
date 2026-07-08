@@ -6,6 +6,17 @@ A generic, self-contained **ONNX Runtime model server** for [Lemonade](https://g
 
 > Status: **initial scaffold** — not yet built/released. See [#2592](https://github.com/lemonade-sdk/lemonade/issues/2592).
 
+## Scope
+
+ort-server serves **text-modality** ONNX graphs — classification today, embeddings
+and reranking next. It builds the full text operator set from onnxruntime-extensions
+(every tokenizer + string/regex ops). Vision and audio operators are **out of scope
+by design**, not omitted for size (bundles are only ~4–18 MB): those modalities are
+served by other Lemonade backends (images → stable-diffusion.cpp; audio →
+whisper / moonshine / kokoro), and they pull heavy deps (OpenCV, DLIB + an FFT
+backend). If ort-server ever needs to run a non-text graph, revisit the op set in
+`CMakeLists.txt`.
+
 ## Design
 
 The server is thin. Genericity lives in the **artifacts**, not the code:

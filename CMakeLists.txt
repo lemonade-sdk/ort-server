@@ -42,25 +42,29 @@ set(ORT_ROOT "${onnxruntime_SOURCE_DIR}")
 
 # --- onnxruntime-extensions (in-graph tokenizers) --------------------------
 # Built from source; provides the statically-linkable custom-op registration.
-# We only need the text tokenizers — disable vision/audio/opencv/blingfire so
-# we don't drag in OpenCV (which fails to configure on Windows/macOS) and to
-# keep the build fast.
+#
+# SCOPE (deliberate, not a size trim — bundles are only ~4-18 MB): ort-server
+# serves TEXT-modality ONNX graphs (classification now; embeddings/reranking
+# next). We build the FULL text op set — every tokenizer plus string/regex ops.
+# Vision/audio/math ops are excluded by scope: those modalities belong to other
+# Lemonade backends (images -> stable-diffusion.cpp; audio -> whisper / moonshine
+# / kokoro) and pull heavy deps (OpenCV; DLIB + an FFT backend). Revisit only if
+# ort-server ever needs to run a non-text graph.
 set(OCOS_ENABLE_CTEST OFF CACHE BOOL "" FORCE)
+# In scope — text ops:
+set(OCOS_ENABLE_SPM_TOKENIZER ON CACHE BOOL "" FORCE)
+set(OCOS_ENABLE_BERT_TOKENIZER ON CACHE BOOL "" FORCE)
+set(OCOS_ENABLE_WORDPIECE_TOKENIZER ON CACHE BOOL "" FORCE)
+set(OCOS_ENABLE_GPT2_TOKENIZER ON CACHE BOOL "" FORCE)
+set(OCOS_ENABLE_RE2_REGEX ON CACHE BOOL "" FORCE)
+# Out of scope — other backends' modalities (also avoids OpenCV + DLIB/FFT):
 set(OCOS_ENABLE_VISION OFF CACHE BOOL "" FORCE)
 set(OCOS_ENABLE_CV2 OFF CACHE BOOL "" FORCE)
 set(OCOS_ENABLE_OPENCV_CODECS OFF CACHE BOOL "" FORCE)
 set(OCOS_ENABLE_AUDIO OFF CACHE BOOL "" FORCE)
-set(OCOS_ENABLE_BLINGFIRE OFF CACHE BOOL "" FORCE)
-# Tokenizers only — no math/DFT operators. Extensions >=0.14 gates math ops on
-# DLIB (which then needs an FFT backend that fails to link on Windows:
-# "unresolved external symbol dlib::fft"). We don't use math ops, so disable
-# both (OCOS_ENABLE_MATH OFF removes the DLIB requirement at the root).
 set(OCOS_ENABLE_MATH OFF CACHE BOOL "" FORCE)
 set(OCOS_ENABLE_DLIB OFF CACHE BOOL "" FORCE)
-set(OCOS_ENABLE_GPT2_TOKENIZER ON CACHE BOOL "" FORCE)
-set(OCOS_ENABLE_SPM_TOKENIZER ON CACHE BOOL "" FORCE)
-set(OCOS_ENABLE_WORDPIECE_TOKENIZER ON CACHE BOOL "" FORCE)
-set(OCOS_ENABLE_BERT_TOKENIZER ON CACHE BOOL "" FORCE)
+set(OCOS_ENABLE_BLINGFIRE OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(ortextensions
   GIT_REPOSITORY https://github.com/microsoft/onnxruntime-extensions.git
   GIT_TAG ${ORT_EXTENSIONS_TAG})
