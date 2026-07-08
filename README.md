@@ -9,24 +9,25 @@ A generic, self-contained **ONNX Runtime model server** for [Lemonade](https://g
 ## Scope
 
 ort-server serves **text-modality** ONNX graphs — classification today, embeddings
-and reranking next. It builds the full text operator set from onnxruntime-extensions
-(every tokenizer + string/regex ops). Vision and audio operators are **out of scope
-by design**, not omitted for size (bundles are only ~4–18 MB): those modalities are
+and reranking next. Because it tokenizes from the model's own `tokenizer.json`,
+any HuggingFace text classifier runs from a standard ONNX export with no per-model
+work. Vision and audio models are **out of scope by design**: those modalities are
 served by other Lemonade backends (images → stable-diffusion.cpp; audio →
-whisper / moonshine / kokoro), and they pull heavy deps (OpenCV, DLIB + an FFT
-backend). If ort-server ever needs to run a non-text graph, revisit the op set in
-`CMakeLists.txt`.
+whisper / moonshine / kokoro).
 
 ## Design
 
-The server is thin. Genericity lives in the **artifacts**, not the code:
+The server is thin, and a model is easy to bring: a **standard ONNX export**, its
+own **`tokenizer.json`**, and a small **`manifest.json`**.
 
-- Each model ships a self-contained ONNX graph with **tokenization + pre/post baked in** (via [onnxruntime-extensions](https://github.com/microsoft/onnxruntime-extensions)) — so the graph takes a **raw string** and emits logits. The server never implements a tokenizer.
-- A `manifest.json` beside the model declares the task and how to shape the output.
+- `model.onnx` is a plain export (`input_ids`/`attention_mask`[/`token_type_ids`] → logits) — the ordinary `optimum` export, no in-graph baking, no custom ops.
+- The server tokenizes at runtime by loading the model's `tokenizer.json` via [mlc-ai/tokenizers-cpp](https://github.com/mlc-ai/tokenizers-cpp) — the exact HuggingFace tokenizer, so parity is guaranteed.
+- `manifest.json` declares the task and how to shape the output.
 
 ```
 model-dir/
-  model.onnx        # string-in -> logits (tokenizer baked via ort-extensions)
+  model.onnx        # plain export: input_ids/attention_mask -> logits
+  tokenizer.json    # the model's HuggingFace tokenizer
   manifest.json
 ```
 
@@ -63,7 +64,7 @@ cmake --build build --config Release
 ./build/ort-server --model-path <model-dir> --port 8100
 ```
 
-CMake fetches ONNX Runtime, onnxruntime-extensions, cpp-httplib, and nlohmann/json (see `CMakeLists.txt`). Pin versions there.
+CMake fetches ONNX Runtime, tokenizers-cpp, cpp-httplib, and nlohmann/json (see `CMakeLists.txt`). tokenizers-cpp builds a small Rust static lib, so **cargo/rustup must be on PATH** to build ort-server from source (build-time only — users of the prebuilt binary need nothing).
 
 ## Releases
 
