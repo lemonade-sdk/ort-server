@@ -25,6 +25,12 @@ jobs:
           - { os: ubuntu-24.04-arm, platform: linux-arm64, archive: tar }
           - { os: macos-latest,     platform: macos-arm64, archive: tar }
     runs-on: ${{ matrix.os }}
+    # On the native arm64 runner, cc-rs (via the Rust onig_sys crate) looks for a
+    # cross-prefixed "aarch64-unknown-linux-gnu-gcc"; point it at the native gcc.
+    # Ignored on the other targets.
+    env:
+      CC_aarch64_unknown_linux_gnu: gcc
+      CXX_aarch64_unknown_linux_gnu: g++
     steps:
       - uses: actions/checkout@v4
 
