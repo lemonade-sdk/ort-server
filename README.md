@@ -47,7 +47,7 @@ v1 ships **CPU EP** only. The roadmap adds providers as build variants without c
 ## Build
 
 ```bash
-cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.5
 cmake --build build --config Release
 ./build/ort-server --model-path <model-dir> --port 8100
 ```

@@ -42,7 +42,20 @@ set(ORT_ROOT "${onnxruntime_SOURCE_DIR}")
 
 # --- onnxruntime-extensions (in-graph tokenizers) --------------------------
 # Built from source; provides the statically-linkable custom-op registration.
+# We only need the text tokenizers — disable vision/audio/opencv/blingfire so
+# we don't drag in OpenCV (which fails to configure on Windows/macOS) and to
+# keep the build fast.
 set(OCOS_ENABLE_CTEST OFF CACHE BOOL "" FORCE)
+set(OCOS_ENABLE_VISION OFF CACHE BOOL "" FORCE)
+set(OCOS_ENABLE_CV2 OFF CACHE BOOL "" FORCE)
+set(OCOS_ENABLE_OPENCV_CODECS OFF CACHE BOOL "" FORCE)
+set(OCOS_ENABLE_AUDIO OFF CACHE BOOL "" FORCE)
+set(OCOS_ENABLE_BLINGFIRE OFF CACHE BOOL "" FORCE)
+set(OCOS_ENABLE_DLIB OFF CACHE BOOL "" FORCE)
+set(OCOS_ENABLE_GPT2_TOKENIZER ON CACHE BOOL "" FORCE)
+set(OCOS_ENABLE_SPM_TOKENIZER ON CACHE BOOL "" FORCE)
+set(OCOS_ENABLE_WORDPIECE_TOKENIZER ON CACHE BOOL "" FORCE)
+set(OCOS_ENABLE_BERT_TOKENIZER ON CACHE BOOL "" FORCE)
 FetchContent_Declare(ortextensions
   GIT_REPOSITORY https://github.com/microsoft/onnxruntime-extensions.git
   GIT_TAG ${ORT_EXTENSIONS_TAG})
