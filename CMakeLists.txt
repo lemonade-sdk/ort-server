@@ -51,10 +51,12 @@ set(OCOS_ENABLE_CV2 OFF CACHE BOOL "" FORCE)
 set(OCOS_ENABLE_OPENCV_CODECS OFF CACHE BOOL "" FORCE)
 set(OCOS_ENABLE_AUDIO OFF CACHE BOOL "" FORCE)
 set(OCOS_ENABLE_BLINGFIRE OFF CACHE BOOL "" FORCE)
-# DLIB stays ON: onnxruntime-extensions >= 0.14 couples tokenizer math ops to it
-# ("Math operators require DLIB to be enabled"). It's lightweight (vendored math,
-# no OpenCV-style deps).
-set(OCOS_ENABLE_DLIB ON CACHE BOOL "" FORCE)
+# Tokenizers only — no math/DFT operators. Extensions >=0.14 gates math ops on
+# DLIB (which then needs an FFT backend that fails to link on Windows:
+# "unresolved external symbol dlib::fft"). We don't use math ops, so disable
+# both (OCOS_ENABLE_MATH OFF removes the DLIB requirement at the root).
+set(OCOS_ENABLE_MATH OFF CACHE BOOL "" FORCE)
+set(OCOS_ENABLE_DLIB OFF CACHE BOOL "" FORCE)
 set(OCOS_ENABLE_GPT2_TOKENIZER ON CACHE BOOL "" FORCE)
 set(OCOS_ENABLE_SPM_TOKENIZER ON CACHE BOOL "" FORCE)
 set(OCOS_ENABLE_WORDPIECE_TOKENIZER ON CACHE BOOL "" FORCE)
