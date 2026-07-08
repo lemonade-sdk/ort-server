@@ -28,6 +28,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # tokenizers-cpp builds a small Rust static lib via cargo.
+      - uses: dtolnay/rust-toolchain@stable
+
       - name: Resolve version
         id: ver
         shell: bash

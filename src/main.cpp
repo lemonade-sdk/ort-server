@@ -11,10 +11,9 @@
 #include <nlohmann/json.hpp>
 #include <onnxruntime_cxx_api.h>
 
-// onnxruntime-extensions tokenizer C API (used purely as a tokenizer library;
-// the model graph itself uses no custom ops).
-#include "ortx_tokenizer.h"
-#include "ortx_utils.h"
+// tokenizers-cpp loads the model's own HF tokenizer.json and tokenizes in
+// process. The model graph itself is a plain ONNX export (no custom ops).
+#include "tokenizers_cpp.h"
 
 #include <algorithm>
 #include <array>
@@ -22,7 +21,9 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <map>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -82,22 +83,10 @@ std::vector<float> softmax(const float* v, size_t n) {
     return out;
 }
 
-// Tokenize one string via onnxruntime-extensions. Returns the token ids.
-std::vector<int64_t> tokenize(OrtxTokenizer* tokenizer, const std::string& text) {
-    const char* inputs[] = {text.c_str()};
-    OrtxTokenId2DArray* ids_2d = nullptr;
-    if (OrtxTokenize(tokenizer, inputs, 1, &ids_2d) != kOrtxOK) {
-        throw std::runtime_error("tokenization failed");
-    }
-    const extTokenId_t* ids = nullptr;
-    size_t len = 0;
-    if (OrtxTokenId2DArrayGetItem(ids_2d, 0, &ids, &len) != kOrtxOK) {
-        ORTX_DISPOSE(ids_2d);
-        throw std::runtime_error("failed to read token ids");
-    }
-    std::vector<int64_t> out(ids, ids + len);
-    ORTX_DISPOSE(ids_2d);
-    return out;
+std::string load_bytes(const fs::path& p) {
+    std::ifstream f(p, std::ios::binary);
+    if (!f) throw std::runtime_error("cannot open " + p.string());
+    return std::string(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
 }
 
 class Model {
@@ -105,9 +94,8 @@ public:
     Model(const fs::path& dir, bool verbose)
         : env_(ORT_LOGGING_LEVEL_WARNING, "ort-server"), manifest_(load_manifest(dir)) {
         (void)verbose;
-        if (OrtxCreateTokenizer(&tokenizer_, dir.string().c_str()) != kOrtxOK || !tokenizer_) {
-            throw std::runtime_error("failed to load tokenizer from " + dir.string());
-        }
+        tokenizer_ = tokenizers::Tokenizer::FromBlobJSON(load_bytes(dir / "tokenizer.json"));
+        if (!tokenizer_) throw std::runtime_error("failed to load tokenizer.json from " + dir.string());
 
         Ort::SessionOptions opts;
         opts.SetIntraOpNumThreads(0);
@@ -123,12 +111,9 @@ public:
         }
     }
 
-    ~Model() {
-        if (tokenizer_) ORTX_DISPOSE(tokenizer_);
-    }
-
     json classify(const std::string& text, int top_k) {
-        std::vector<int64_t> input_ids = tokenize(tokenizer_, text);
+        std::vector<int32_t> ids32 = tokenizer_->Encode(text);
+        std::vector<int64_t> input_ids(ids32.begin(), ids32.end());
         const int64_t seq_len = static_cast<int64_t>(input_ids.size());
         if (seq_len == 0) throw std::runtime_error("empty tokenization");
 
@@ -195,7 +180,7 @@ private:
     Ort::Env env_;
     Ort::Session session_{nullptr};
     Ort::AllocatorWithDefaultOptions alloc_;
-    OrtxTokenizer* tokenizer_ = nullptr;
+    std::unique_ptr<tokenizers::Tokenizer> tokenizer_;
     std::vector<std::string> input_names_;
     std::vector<std::string> output_names_;
     Manifest manifest_;
