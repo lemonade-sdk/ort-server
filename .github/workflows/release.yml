@@ -28,13 +28,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Pin CMake: runner images ship inconsistent versions (some CMake 4.x,
-      # which fatally rejects the old cmake_minimum_required in sentencepiece /
-      # protobuf / etc.). 3.31 accepts them (deprecation warning only).
-      - uses: jwlawson/actions-setup-cmake@v2
-        with:
-          cmake-version: "3.31.6"
-
       - name: Resolve version
         id: ver
         shell: bash
@@ -43,14 +36,13 @@ jobs:
           [ -z "$V" ] && V="${GITHUB_REF_NAME#v}"
           echo "version=$V" >> "$GITHUB_OUTPUT"
 
+      # Use the runner's default CMake (Windows ships 4.x for VS 2026 support).
+      # Pass CMAKE_POLICY_VERSION_MINIMUM via bash (PowerShell mangles "3.5" ->
+      # "3") so CMake 4.x accepts the old cmake_minimum_required in sentencepiece
+      # / protobuf / etc.
       - name: Configure
         shell: bash
-        run: |
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            cmake -B build -G "Visual Studio 17 2022" -A x64
-          else
-            cmake -B build -DCMAKE_BUILD_TYPE=Release
-          fi
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.5
 
       - name: Build
         run: cmake --build build --config Release --parallel
