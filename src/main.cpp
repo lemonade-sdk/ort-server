@@ -65,7 +65,10 @@ Manifest load_manifest(const fs::path& dir) {
     json j; f >> j;
     Manifest m;
     m.task = j.at("task").get<std::string>();
-    m.token_aggregation = j.value("token_aggregation", "");
+    // token_aggregation is null for sequence-classification; tolerate null/absent.
+    if (j.contains("token_aggregation") && j["token_aggregation"].is_string()) {
+        m.token_aggregation = j["token_aggregation"].get<std::string>();
+    }
     const auto& id2label = j.at("id2label");
     m.id2label.resize(id2label.size());
     for (auto it = id2label.begin(); it != id2label.end(); ++it) {
