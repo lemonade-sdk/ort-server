@@ -4,7 +4,9 @@ name: release
 # Push a v* tag to build per-platform archives and attach them to the release.
 on:
   push:
-    tags: ["v*"]
+    # Tag == the ort-server version (no `v` prefix), matching the lemond backend
+    # version pin, so the release download URL resolves. `v*` kept for back-compat.
+    tags: ["[0-9]*", "v*"]
   workflow_dispatch:
     inputs:
       version:
