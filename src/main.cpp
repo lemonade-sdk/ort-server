@@ -2,18 +2,23 @@
 //
 // v1: CPU EP, text classification. The model is a plain exported ONNX graph
 // (input_ids / attention_mask / token_type_ids -> logits). This process loads
-// the model + its HF tokenizer (via onnxruntime-extensions) + manifest.json,
-// tokenizes the request at /classify, runs the session, and shapes the output
-// per the manifest (softmax for sequence-classification, per-token aggregation
-// for token-classification).
+// the model + its HF tokenizer (via tokenizers-cpp), derives the output
+// contract from an optional manifest.json (or infers it from the export's own
+// config.json), tokenizes the request at /classify, runs the session, and
+// shapes the output (normalize for sequence-classification, per-token
+// aggregation for token-classification).
 
 #include <httplib.h>
 #include <nlohmann/json.hpp>
 #include <onnxruntime_cxx_api.h>
 
 // tokenizers-cpp loads the model's own HF tokenizer.json and tokenizes in
-// process. The model graph itself is a plain ONNX export (no custom ops).
-#include "tokenizers_cpp.h"
+// process. The C API is used directly: the C++ wrapper's base interface
+// hardcodes add_special_tokens=false, but encoder classifiers need [CLS]/[SEP]
+// to match the HuggingFace reference they were validated against.
+#include "tokenizers_c.h"
+
+#include <mutex>
 
 #include <algorithm>
 #include <array>
@@ -66,29 +71,49 @@ void parse_id2label(const json& id2label, Manifest& m, const std::string& origin
         throw std::runtime_error("id2label is missing or empty in " + origin);
     }
     m.id2label.resize(id2label.size());
+    std::vector<bool> seen(id2label.size(), false);
     for (auto it = id2label.begin(); it != id2label.end(); ++it) {
-        size_t idx = std::stoul(it.key());
-        if (idx >= m.id2label.size()) {
-            throw std::runtime_error("id2label keys must be contiguous 0..n-1 in " + origin);
+        size_t pos = 0;
+        unsigned long idx = 0;
+        try {
+            idx = std::stoul(it.key(), &pos);
+        } catch (const std::exception&) {
+            pos = 0;
         }
+        if (pos != it.key().size()) {
+            throw std::runtime_error("id2label key '" + it.key() + "' is not an index in " + origin);
+        }
+        if (idx >= m.id2label.size() || seen[idx]) {
+            throw std::runtime_error("id2label keys must be unique and contiguous 0..n-1 in " + origin);
+        }
+        if (!it.value().is_string()) {
+            throw std::runtime_error("id2label values must be strings in " + origin);
+        }
+        seen[idx] = true;
         m.id2label[idx] = it.value().get<std::string>();
     }
 }
 
+// Best-effort: tokenizer_config.json is an optional refinement, so a missing
+// or malformed file never aborts startup.
 void apply_tokenizer_max_length(const fs::path& dir, Manifest& m) {
     std::ifstream tf(dir / "tokenizer_config.json");
     if (!tf) return;
-    json tj; tf >> tj;
-    // HF writes a huge sentinel (1e30) when the tokenizer has no real limit;
-    // that parses as a double and is skipped by the integer check.
-    if (tj.contains("model_max_length") && tj["model_max_length"].is_number_integer()) {
-        auto n = tj["model_max_length"].get<long long>();
-        if (n >= 2 && n <= 1000000) m.max_length = static_cast<int>(n);
+    try {
+        json tj; tf >> tj;
+        // HF writes a huge sentinel (1e30) when the tokenizer has no real limit;
+        // that parses as a double and is skipped by the integer check.
+        if (tj.contains("model_max_length") && tj["model_max_length"].is_number_integer()) {
+            auto n = tj["model_max_length"].get<long long>();
+            if (n >= 2 && n <= 1000000) m.max_length = static_cast<int>(n);
+        }
+    } catch (const std::exception&) {
     }
 }
 
 Manifest manifest_from_json(const fs::path& dir) {
     std::ifstream f(dir / "manifest.json");
+    if (!f) throw std::runtime_error("cannot open manifest.json in " + dir.string());
     json j; f >> j;
     Manifest m;
     m.task = j.at("task").get<std::string>();
@@ -96,22 +121,32 @@ Manifest manifest_from_json(const fs::path& dir) {
         throw std::runtime_error("unsupported task in manifest.json: '" + m.task +
                                  "' (expected text-classification or token-classification)");
     }
-    if (j.contains("score_normalization") && j["score_normalization"].is_string()) {
+    // Wrong-typed values are errors, not silent fallbacks to defaults.
+    if (j.contains("score_normalization")) {
+        if (!j["score_normalization"].is_string()) {
+            throw std::runtime_error("score_normalization must be a string");
+        }
         m.score_normalization = j["score_normalization"].get<std::string>();
     }
     // "none" is rejected: the /classify contract promises label scores in [0,1].
     if (m.score_normalization != "softmax" && m.score_normalization != "sigmoid") {
         throw std::runtime_error("unsupported score_normalization: " + m.score_normalization);
     }
-    // token_aggregation is null for sequence-classification; tolerate null/absent.
-    if (j.contains("token_aggregation") && j["token_aggregation"].is_string()) {
+    // token_aggregation is null for sequence-classification; tolerate null/absent,
+    // but reject unknown values regardless of task.
+    if (j.contains("token_aggregation") && !j["token_aggregation"].is_null()) {
+        if (!j["token_aggregation"].is_string()) {
+            throw std::runtime_error("token_aggregation must be a string or null");
+        }
         m.token_aggregation = j["token_aggregation"].get<std::string>();
+        if (m.token_aggregation != "max" && m.token_aggregation != "mean") {
+            throw std::runtime_error("unsupported token_aggregation: " + m.token_aggregation);
+        }
     }
-    if (m.task == "token-classification" &&
-        m.token_aggregation != "max" && m.token_aggregation != "mean") {
-        throw std::runtime_error("unsupported token_aggregation: " + m.token_aggregation);
-    }
-    if (j.contains("max_length") && j["max_length"].is_number_integer()) {
+    if (j.contains("max_length")) {
+        if (!j["max_length"].is_number_integer()) {
+            throw std::runtime_error("max_length must be an integer");
+        }
         m.max_length = j["max_length"].get<int>();
         if (m.max_length < 2) throw std::runtime_error("max_length must be >= 2");
     }
@@ -201,7 +236,8 @@ public:
     Model(const fs::path& dir, bool verbose)
         : env_(ORT_LOGGING_LEVEL_WARNING, "ort-server"), manifest_(load_manifest(dir)) {
         (void)verbose;
-        tokenizer_ = tokenizers::Tokenizer::FromBlobJSON(load_bytes(dir / "tokenizer.json"));
+        std::string blob = load_bytes(dir / "tokenizer.json");
+        tokenizer_ = tokenizers_new_from_str(blob.data(), blob.size());
         if (!tokenizer_) throw std::runtime_error("failed to load tokenizer.json from " + dir.string());
 
         Ort::SessionOptions opts;
@@ -218,9 +254,27 @@ public:
         }
     }
 
+    ~Model() {
+        if (tokenizer_) tokenizers_free(tokenizer_);
+    }
+    Model(const Model&) = delete;
+    Model& operator=(const Model&) = delete;
+
     json classify(const std::string& text, int top_k) {
-        std::vector<int32_t> ids32 = tokenizer_->Encode(text);
-        std::vector<int64_t> input_ids(ids32.begin(), ids32.end());
+        // Special tokens ON: encoder classifiers pool [CLS]/use [SEP], and the
+        // catalog's parity validation runs the HF tokenizer with them enabled —
+        // serving without them would silently diverge from the validated scores.
+        // The mutex covers the Rust FFI's &mut self contract; tokenization is
+        // microseconds next to the session run, which stays concurrent.
+        std::vector<int64_t> input_ids;
+        {
+            std::lock_guard<std::mutex> lock(tokenizer_mutex_);
+            TokenizerEncodeResult result;
+            tokenizers_encode(tokenizer_, text.data(), text.size(),
+                              /*add_special_token=*/1, &result);
+            input_ids.assign(result.token_ids, result.token_ids + result.len);
+            tokenizers_free_encode_results(&result, 1);
+        }
         if (input_ids.empty()) throw std::runtime_error("empty tokenization");
 
         // Truncate to the manifest's token budget, keeping the trailing token
@@ -262,8 +316,13 @@ public:
         auto outputs = session_.Run(Ort::RunOptions{nullptr}, in_names.data(), inputs.data(),
                                     inputs.size(), out_names.data(), out_names.size());
 
+        auto type_info = outputs[0].GetTensorTypeAndShapeInfo();
+        if (type_info.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+            throw std::runtime_error(
+                "model output must be float32 logits (fp16/quantized-output exports are not supported)");
+        }
         const float* logits = outputs[0].GetTensorData<float>();
-        auto out_shape = outputs[0].GetTensorTypeAndShapeInfo().GetShape();
+        auto out_shape = type_info.GetShape();
         const size_t num_labels = manifest_.id2label.size();
 
         // Guard against a model/manifest mismatch before indexing the buffer.
@@ -298,6 +357,11 @@ public:
             }
         } else {
             // sequence-classification: normalize the label logits.
+            if (out_shape.size() > 2) {
+                throw std::runtime_error(
+                    "text-classification model must output [batch, labels]; got a rank-" +
+                    std::to_string(out_shape.size()) + " tensor (token-classification model?)");
+            }
             auto p = normalize(logits, num_labels, manifest_.score_normalization);
             for (size_t l = 0; l < num_labels; ++l) scores[manifest_.id2label[l]] = p[l];
         }
@@ -315,7 +379,8 @@ private:
     Ort::Env env_;
     Ort::Session session_{nullptr};
     Ort::AllocatorWithDefaultOptions alloc_;
-    std::unique_ptr<tokenizers::Tokenizer> tokenizer_;
+    TokenizerHandle tokenizer_ = nullptr;
+    std::mutex tokenizer_mutex_;
     std::vector<std::string> input_names_;
     std::vector<std::string> output_names_;
     Manifest manifest_;
@@ -330,7 +395,9 @@ int main(int argc, char** argv) {
 
         httplib::Server srv;
         srv.Get("/health", [](const httplib::Request&, httplib::Response& res) {
-            res.set_content("{\"status\":\"ok\"}", "application/json");
+            res.set_content(json{{"status", "ok"},
+                                 {"onnxruntime", ORT_SERVER_ONNXRUNTIME_VERSION}}.dump(),
+                            "application/json");
         });
         srv.Post("/classify", [&](const httplib::Request& req, httplib::Response& res) {
             std::string text;
@@ -353,7 +420,10 @@ int main(int argc, char** argv) {
             }
         });
 
-        srv.listen("127.0.0.1", args.port);
+        if (!srv.listen("127.0.0.1", args.port)) {
+            fprintf(stderr, "ort-server: failed to bind 127.0.0.1:%d\n", args.port);
+            return 1;
+        }
         return 0;
     } catch (const std::exception& e) {
         fprintf(stderr, "ort-server: %s\n", e.what());

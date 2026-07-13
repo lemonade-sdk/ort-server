@@ -32,6 +32,8 @@ jobs:
 
       # tokenizers-cpp builds a small Rust static lib via cargo.
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.88"  # pinned: the tokenizer stack is statically linked
 
       # On the native arm64 runner, the Rust onig_sys crate's cc-rs build looks
       # for a cross-prefixed "aarch64-unknown-linux-gnu-gcc"; give it exactly that
@@ -68,7 +70,7 @@ jobs:
         run: |
           mkdir -p stage
           if [ "${{ runner.os }}" = "Windows" ]; then
-            cp build/Release/ort-server.exe stage/ || cp build/ort-server.exe stage/
+            cp build/Release/ort-server.exe stage/
             cp build/Release/onnxruntime.dll stage/
           else
             cp build/ort-server stage/
@@ -81,11 +83,10 @@ jobs:
           # Verbatim third-party license texts (MIT requires shipping the
           # copyright + permission notice with binary distributions).
           mkdir -p stage/licenses
+          cp third_party_licenses/* stage/licenses/
+          # ORT texts come from the exact version-pinned upstream package.
           cp build/_deps/onnxruntime-src/LICENSE stage/licenses/onnxruntime-LICENSE
           cp build/_deps/onnxruntime-src/ThirdPartyNotices.txt stage/licenses/onnxruntime-ThirdPartyNotices.txt
-          cp build/_deps/tokenizers_cpp-src/LICENSE stage/licenses/tokenizers-cpp-LICENSE
-          cp build/_deps/httplib-src/LICENSE stage/licenses/cpp-httplib-LICENSE
-          cp build/_deps/json-src/LICENSE.MIT stage/licenses/nlohmann-json-LICENSE
 
       - name: Package
         shell: bash
@@ -114,7 +115,7 @@ jobs:
           fi
           [ -f smoke/LICENSE ] || { echo "FAIL: LICENSE missing from archive"; exit 1; }
           [ -f smoke/THIRD_PARTY_NOTICES.md ] || { echo "FAIL: THIRD_PARTY_NOTICES.md missing"; exit 1; }
-          for lf in onnxruntime-LICENSE onnxruntime-ThirdPartyNotices.txt tokenizers-cpp-LICENSE cpp-httplib-LICENSE nlohmann-json-LICENSE; do
+          for lf in onnxruntime-LICENSE onnxruntime-ThirdPartyNotices.txt $(ls third_party_licenses); do
             [ -f "smoke/licenses/$lf" ] || { echo "FAIL: licenses/$lf missing from archive"; exit 1; }
           done
           # Full contract suite: normalization, config.json inference, token

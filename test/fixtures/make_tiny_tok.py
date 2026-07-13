@@ -14,7 +14,12 @@ HERE = Path(__file__).parent
 src = HERE / "tiny-clf"
 dst = HERE / "tiny-tok"
 dst.mkdir(parents=True, exist_ok=True)
-for f in ("tokenizer.json", "tokenizer_config.json", "special_tokens_map.json", "vocab.txt"):
+for f in (
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "special_tokens_map.json",
+    "vocab.txt",
+):
     shutil.copy(src / f, dst / f)
 
 VOCAB = sum(1 for _ in open(src / "vocab.txt", encoding="utf-8"))

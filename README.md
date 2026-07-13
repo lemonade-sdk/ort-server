@@ -2,7 +2,7 @@
 
 A generic, self-contained **ONNX Runtime model server** for [Lemonade](https://github.com/lemonade-sdk/lemonade). It loads one exported ONNX model + a small manifest and serves it over HTTP. Lemonade launches it as a subprocess (like `moonshine-server`) and forwards requests to it.
 
-**Consumer:** lemonade [#2592](https://github.com/lemonade-sdk/lemonade/issues/2592) — the router's `classifier` condition type. Classification is the first capability; the server is intentionally generic so embeddings and reranking can follow.
+**Consumer:** lemonade's `onnxruntime` backend (`/v1/classify`, [#2592](https://github.com/lemonade-sdk/lemonade/issues/2592)). The router's `classifier` condition type will consume that endpoint once [#2384](https://github.com/lemonade-sdk/lemonade/issues/2384) wires it. Classification is the first capability; the server is intentionally generic so embeddings and reranking can follow.
 
 > Status: **experimental** — released and consumed by Lemonade's `onnxruntime` backend. See [#2592](https://github.com/lemonade-sdk/lemonade/issues/2592).
 
@@ -56,9 +56,18 @@ error, and the model's output dimension must match `id2label` at inference time)
 | Method | Path | Body | Response |
 |--------|------|------|----------|
 | GET | `/health` | — | `200` when the model is loaded and ready |
-| POST | `/classify` | `{"text": "...", "top_k": N?}` | `{"labels": {"<label>": <score in [0,1]>, ...}}` |
+| POST | `/classify` | `{"text": "...", "top_k": N?}` | `{"labels": {"<label>": <score in [0,1]>, ...}}` — `top_k` omitted or `0` returns all labels |
 
 Future capabilities (same server, new endpoints): `POST /embed`, `POST /rerank`.
+
+## Model catalog tooling
+
+`tools/classifier_catalog/` holds the Python tooling that produces the
+lemonade-sdk HF catalog for this server: `export.py` (Optimum export +
+manifest + parity validation vs the PyTorch reference), `publish.py`
+(fail-closed license allowlist + parity gates + model cards), and the
+exploratory `export_and_benchmark.py` harness. It lives in this repo so the
+manifest contract's producer and consumer version together.
 
 ## Execution providers
 

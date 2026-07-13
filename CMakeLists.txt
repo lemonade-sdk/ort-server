@@ -12,10 +12,10 @@ include(FetchContent)
 # --- Header-only deps -------------------------------------------------------
 FetchContent_Declare(httplib
   GIT_REPOSITORY https://github.com/yhirose/cpp-httplib.git
-  GIT_TAG v0.18.3)
+  GIT_TAG a7bc00e3307fecdb4d67545e93be7b88cfb1e186)  # v0.18.3
 FetchContent_Declare(json
   GIT_REPOSITORY https://github.com/nlohmann/json.git
-  GIT_TAG v3.11.3)
+  GIT_TAG 9cca280a4d0ccf0c08f47a99aa71d1b0e52f8d03)  # v3.11.3
 FetchContent_MakeAvailable(httplib json)
 
 # --- ONNX Runtime (prebuilt, CPU) ------------------------------------------
@@ -61,6 +61,8 @@ FetchContent_MakeAvailable(tokenizers_cpp)
 
 # --- Target -----------------------------------------------------------------
 add_executable(ort-server src/main.cpp)
+target_compile_definitions(ort-server PRIVATE
+  ORT_SERVER_ONNXRUNTIME_VERSION="${ONNXRUNTIME_VERSION}")
 target_include_directories(ort-server PRIVATE
   "${ORT_ROOT}/include"
   "${tokenizers_cpp_SOURCE_DIR}/include")
