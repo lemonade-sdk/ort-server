@@ -36,7 +36,7 @@ namespace {
 struct Manifest {
     std::string task;                   // "text-classification" | "token-classification"
     std::vector<std::string> id2label;  // index -> label
-    std::string score_normalization = "softmax";  // "softmax" | "sigmoid" | "none"
+    std::string score_normalization = "softmax";  // "softmax" | "sigmoid"
     std::string token_aggregation = "max";        // token-cls only; "max" | "mean"
     int max_length = 512;               // token budget; longer inputs are truncated
 };
@@ -61,11 +61,34 @@ Args parse_args(int argc, char** argv) {
     return a;
 }
 
-// The manifest is a contract; reject anything we would otherwise silently
-// misinterpret so a bad model directory fails at startup, not per request.
-Manifest load_manifest(const fs::path& dir) {
+void parse_id2label(const json& id2label, Manifest& m, const std::string& origin) {
+    if (!id2label.is_object() || id2label.empty()) {
+        throw std::runtime_error("id2label is missing or empty in " + origin);
+    }
+    m.id2label.resize(id2label.size());
+    for (auto it = id2label.begin(); it != id2label.end(); ++it) {
+        size_t idx = std::stoul(it.key());
+        if (idx >= m.id2label.size()) {
+            throw std::runtime_error("id2label keys must be contiguous 0..n-1 in " + origin);
+        }
+        m.id2label[idx] = it.value().get<std::string>();
+    }
+}
+
+void apply_tokenizer_max_length(const fs::path& dir, Manifest& m) {
+    std::ifstream tf(dir / "tokenizer_config.json");
+    if (!tf) return;
+    json tj; tf >> tj;
+    // HF writes a huge sentinel (1e30) when the tokenizer has no real limit;
+    // that parses as a double and is skipped by the integer check.
+    if (tj.contains("model_max_length") && tj["model_max_length"].is_number_integer()) {
+        auto n = tj["model_max_length"].get<long long>();
+        if (n >= 2 && n <= 1000000) m.max_length = static_cast<int>(n);
+    }
+}
+
+Manifest manifest_from_json(const fs::path& dir) {
     std::ifstream f(dir / "manifest.json");
-    if (!f) throw std::runtime_error("manifest.json not found in " + dir.string());
     json j; f >> j;
     Manifest m;
     m.task = j.at("task").get<std::string>();
@@ -76,8 +99,8 @@ Manifest load_manifest(const fs::path& dir) {
     if (j.contains("score_normalization") && j["score_normalization"].is_string()) {
         m.score_normalization = j["score_normalization"].get<std::string>();
     }
-    if (m.score_normalization != "softmax" && m.score_normalization != "sigmoid" &&
-        m.score_normalization != "none") {
+    // "none" is rejected: the /classify contract promises label scores in [0,1].
+    if (m.score_normalization != "softmax" && m.score_normalization != "sigmoid") {
         throw std::runtime_error("unsupported score_normalization: " + m.score_normalization);
     }
     // token_aggregation is null for sequence-classification; tolerate null/absent.
@@ -92,17 +115,63 @@ Manifest load_manifest(const fs::path& dir) {
         m.max_length = j["max_length"].get<int>();
         if (m.max_length < 2) throw std::runtime_error("max_length must be >= 2");
     }
-    const auto& id2label = j.at("id2label");
-    if (id2label.empty()) throw std::runtime_error("id2label is empty in manifest.json");
-    m.id2label.resize(id2label.size());
-    for (auto it = id2label.begin(); it != id2label.end(); ++it) {
-        size_t idx = std::stoul(it.key());
-        if (idx >= m.id2label.size()) {
-            throw std::runtime_error("id2label keys must be contiguous 0..n-1");
-        }
-        m.id2label[idx] = it.value().get<std::string>();
-    }
+    parse_id2label(j.at("id2label"), m, "manifest.json");
     return m;
+}
+
+// Fallback for a stock HF/Optimum export (no manifest.json): infer the contract
+// from config.json (+ tokenizer_config.json), applying HF problem_type semantics.
+Manifest manifest_from_hf_config(const fs::path& dir) {
+    std::ifstream f(dir / "config.json");
+    if (!f) {
+        throw std::runtime_error("neither manifest.json nor config.json found in " +
+                                 dir.string());
+    }
+    json j; f >> j;
+    Manifest m;
+
+    std::string arch;
+    if (j.contains("architectures") && j["architectures"].is_array() &&
+        !j["architectures"].empty() && j["architectures"][0].is_string()) {
+        arch = j["architectures"][0].get<std::string>();
+    }
+    auto ends_with = [](const std::string& s, const std::string& suffix) {
+        return s.size() >= suffix.size() &&
+               s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
+    };
+    if (ends_with(arch, "ForTokenClassification")) {
+        m.task = "token-classification";
+    } else if (ends_with(arch, "ForSequenceClassification")) {
+        m.task = "text-classification";
+    } else {
+        throw std::runtime_error("cannot infer task from config.json architecture '" +
+                                 arch + "'; provide a manifest.json");
+    }
+
+    std::string problem_type;
+    if (j.contains("problem_type") && j["problem_type"].is_string()) {
+        problem_type = j["problem_type"].get<std::string>();
+    }
+    if (problem_type == "regression") {
+        throw std::runtime_error("regression heads have no label scores in [0,1]");
+    }
+    m.score_normalization = (m.task == "text-classification" &&
+                             problem_type == "multi_label_classification")
+                                ? "sigmoid" : "softmax";
+
+    parse_id2label(j.at("id2label"), m, "config.json");
+    if (m.id2label.size() < 2) {
+        throw std::runtime_error("single-output heads have no label scores in [0,1]");
+    }
+    apply_tokenizer_max_length(dir, m);
+    return m;
+}
+
+// manifest.json (explicit contract, validated strictly) wins; a bare Optimum
+// export runs via config.json inference so users need no lemonade tooling.
+Manifest load_manifest(const fs::path& dir) {
+    if (fs::exists(dir / "manifest.json")) return manifest_from_json(dir);
+    return manifest_from_hf_config(dir);
 }
 
 std::vector<float> softmax(const float* v, size_t n) {
@@ -117,11 +186,7 @@ std::vector<float> softmax(const float* v, size_t n) {
 std::vector<float> normalize(const float* v, size_t n, const std::string& mode) {
     if (mode == "softmax") return softmax(v, n);
     std::vector<float> out(n);
-    if (mode == "sigmoid") {
-        for (size_t i = 0; i < n; ++i) out[i] = 1.0f / (1.0f + std::exp(-v[i]));
-    } else {
-        std::copy(v, v + n, out.begin());
-    }
+    for (size_t i = 0; i < n; ++i) out[i] = 1.0f / (1.0f + std::exp(-v[i]));
     return out;
 }
 

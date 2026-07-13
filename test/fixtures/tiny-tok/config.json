@@ -1,7 +1,7 @@
 {
   "activation": "gelu",
   "architectures": [
-    "DistilBertForSequenceClassification"
+    "DistilBertForTokenClassification"
   ],
   "attention_dropout": 0.1,
   "dim": 32,
@@ -21,8 +21,9 @@
   "transformers_version": "4.57.6",
   "vocab_size": 1124,
   "id2label": {
-    "0": "LABEL_0",
-    "1": "LABEL_1"
+    "0": "O",
+    "1": "ENT_A",
+    "2": "ENT_B"
   },
   "label2id": {
     "LABEL_0": 0,

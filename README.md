@@ -17,27 +17,35 @@ whisper / moonshine / kokoro).
 
 ## Design
 
-The server is thin, and a model is easy to bring: a **standard ONNX export**, its
-own **`tokenizer.json`**, and a small **`manifest.json`**.
+The server is thin, and a model is easy to bring: **a stock Optimum export runs
+as-is** — `optimum-cli export onnx --model <hf_id> <dir>` and point ort-server
+at the directory.
 
 - `model.onnx` is a plain export (`input_ids`/`attention_mask`[/`token_type_ids`] → logits) — the ordinary `optimum` export, no in-graph baking, no custom ops.
 - The server tokenizes at runtime by loading the model's `tokenizer.json` via [mlc-ai/tokenizers-cpp](https://github.com/mlc-ai/tokenizers-cpp) — the exact HuggingFace tokenizer, so parity is guaranteed.
-- `manifest.json` declares the task and how to shape the output.
+- The output contract (task, labels, normalization, token budget) is inferred
+  from the export's own `config.json` + `tokenizer_config.json`, honoring HF
+  `problem_type` semantics (`multi_label_classification` → sigmoid; regression
+  heads are rejected — no label scores in [0,1]).
+- An optional **`manifest.json`** overrides the inference; when present it is
+  the contract and is validated strictly.
 
 ```
 model-dir/
-  model.onnx        # plain export: input_ids/attention_mask -> logits
-  tokenizer.json    # the model's HuggingFace tokenizer
-  manifest.json
+  model.onnx             # plain export: input_ids/attention_mask -> logits
+  tokenizer.json         # the model's HuggingFace tokenizer
+  config.json            # stock HF config (id2label / problem_type / architectures)
+  tokenizer_config.json  # model_max_length
+  manifest.json          # OPTIONAL explicit override of the inferred contract
 ```
 
-`manifest.json` (validated at startup — unknown values are a startup error, and
-the model's output dimension must match `id2label` at inference time):
+`manifest.json` override (validated at startup — unknown values are a startup
+error, and the model's output dimension must match `id2label` at inference time):
 ```json
 {
   "task": "text-classification",        // or "token-classification"
   "id2label": {"0": "SAFE", "1": "INJECTION"},
-  "score_normalization": "softmax",     // "softmax" (default) | "sigmoid" | "none"
+  "score_normalization": "softmax",     // "softmax" (default) | "sigmoid"
   "token_aggregation": null,            // token-classification: "max" (default) | "mean"
   "max_length": 512                     // optional token budget; longer inputs are truncated
 }

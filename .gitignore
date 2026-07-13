@@ -3,3 +3,5 @@ stage/
 dist/
 *.zip
 *.tar.gz
+build*/
+*.log

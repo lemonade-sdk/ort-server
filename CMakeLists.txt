@@ -20,21 +20,28 @@ FetchContent_MakeAvailable(httplib json)
 
 # --- ONNX Runtime (prebuilt, CPU) ------------------------------------------
 # Microsoft publishes per-platform CPU archives on the onnxruntime releases page.
+# Per-archive SHA256 pins (recompute when bumping ONNXRUNTIME_VERSION — see
+# docs/UPGRADING-ORT.md).
 if(WIN32)
   set(_ort_pkg "onnxruntime-win-x64-${ONNXRUNTIME_VERSION}")
   set(_ort_ext "zip")
+  set(_ort_sha256 "c5c81710938e68079ff1a192b04897faabe4b43830d48f39f27ecd4e16138bfc")
 elseif(APPLE)
   set(_ort_pkg "onnxruntime-osx-arm64-${ONNXRUNTIME_VERSION}")
   set(_ort_ext "tgz")
+  set(_ort_sha256 "545e81c58152353acb0d1e8bd6ce4b62f830c0961f5b3acfedc790ffd76e477a")
 elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
   set(_ort_pkg "onnxruntime-linux-aarch64-${ONNXRUNTIME_VERSION}")
   set(_ort_ext "tgz")
+  set(_ort_sha256 "3e4d83ac06924a32a07b6d7f91ce6f852876153fc0bbdf931bf517a140bfbe48")
 else()
   set(_ort_pkg "onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}")
   set(_ort_ext "tgz")
+  set(_ort_sha256 "547e40a48f1fe73e3f812d7c88a948612c23f896b91e4e2ee1e232d7b468246f")
 endif()
 FetchContent_Declare(onnxruntime
-  URL "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/${_ort_pkg}.${_ort_ext}")
+  URL "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/${_ort_pkg}.${_ort_ext}"
+  URL_HASH SHA256=${_ort_sha256})
 FetchContent_MakeAvailable(onnxruntime)
 set(ORT_ROOT "${onnxruntime_SOURCE_DIR}")
 
@@ -49,7 +56,7 @@ if(WIN32)
 endif()
 FetchContent_Declare(tokenizers_cpp
   GIT_REPOSITORY https://github.com/mlc-ai/tokenizers-cpp.git
-  GIT_TAG main)
+  GIT_TAG c586c52f93f7b060753bd2388eb96a105cb7374d)  # pinned main, 2026-07
 FetchContent_MakeAvailable(tokenizers_cpp)
 
 # --- Target -----------------------------------------------------------------

@@ -78,6 +78,14 @@ jobs:
             done
           fi
           cp LICENSE THIRD_PARTY_NOTICES.md stage/
+          # Verbatim third-party license texts (MIT requires shipping the
+          # copyright + permission notice with binary distributions).
+          mkdir -p stage/licenses
+          cp build/_deps/onnxruntime-src/LICENSE stage/licenses/onnxruntime-LICENSE
+          cp build/_deps/onnxruntime-src/ThirdPartyNotices.txt stage/licenses/onnxruntime-ThirdPartyNotices.txt
+          cp build/_deps/tokenizers_cpp-src/LICENSE stage/licenses/tokenizers-cpp-LICENSE
+          cp build/_deps/httplib-src/LICENSE stage/licenses/cpp-httplib-LICENSE
+          cp build/_deps/json-src/LICENSE.MIT stage/licenses/nlohmann-json-LICENSE
 
       - name: Package
         shell: bash
@@ -106,24 +114,12 @@ jobs:
           fi
           [ -f smoke/LICENSE ] || { echo "FAIL: LICENSE missing from archive"; exit 1; }
           [ -f smoke/THIRD_PARTY_NOTICES.md ] || { echo "FAIL: THIRD_PARTY_NOTICES.md missing"; exit 1; }
-          "$BIN" --model-path test/fixtures/tiny-clf --port 8123 &
-          SRV=$!
-          ok=""
-          for i in $(seq 1 30); do
-            if curl -sf http://127.0.0.1:8123/health >/dev/null; then ok=1; break; fi
-            sleep 1
+          for lf in onnxruntime-LICENSE onnxruntime-ThirdPartyNotices.txt tokenizers-cpp-LICENSE cpp-httplib-LICENSE nlohmann-json-LICENSE; do
+            [ -f "smoke/licenses/$lf" ] || { echo "FAIL: licenses/$lf missing from archive"; exit 1; }
           done
-          [ -n "$ok" ] || { echo "server did not become ready"; kill $SRV 2>/dev/null || true; exit 1; }
-          RESP=$(curl -sf -X POST http://127.0.0.1:8123/classify \
-                 -H "Content-Type: application/json" -d '{"text":"hello world"}')
-          echo "classify response: $RESP"
-          BAD=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8123/classify \
-                -H "Content-Type: application/json" -d '{"nope":1}')
-          kill $SRV 2>/dev/null || true
-          echo "$RESP" | grep -q '"labels"' || { echo "FAIL: no labels field"; exit 1; }
-          echo "$RESP" | grep -q 'LABEL_' || { echo "FAIL: expected label missing"; exit 1; }
-          [ "$BAD" = "400" ] || { echo "FAIL: malformed request returned $BAD, want 400"; exit 1; }
-          echo "smoke test passed"
+          # Full contract suite: normalization, config.json inference, token
+          # aggregation, truncation, top_k, validation 400s, startup rejects.
+          python3 test/smoke.py "$BIN"
 
       - uses: actions/upload-artifact@v4
         with:
