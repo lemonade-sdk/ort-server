@@ -72,7 +72,10 @@ jobs:
             cp build/Release/onnxruntime.dll stage/
           else
             cp build/ort-server stage/
-            cp -P build/_deps/onnxruntime-src/lib/libonnxruntime.* stage/
+            # Skip directories (macOS ships a .dSYM debug-symbol dir alongside).
+            for f in build/_deps/onnxruntime-src/lib/libonnxruntime.*; do
+              [ -d "$f" ] || cp -P "$f" stage/
+            done
           fi
           cp LICENSE THIRD_PARTY_NOTICES.md stage/
 
