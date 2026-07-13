@@ -36,7 +36,9 @@ namespace {
 struct Manifest {
     std::string task;                   // "text-classification" | "token-classification"
     std::vector<std::string> id2label;  // index -> label
-    std::string token_aggregation;      // token-cls only; "" for seq-cls
+    std::string score_normalization = "softmax";  // "softmax" | "sigmoid" | "none"
+    std::string token_aggregation = "max";        // token-cls only; "max" | "mean"
+    int max_length = 512;               // token budget; longer inputs are truncated
 };
 
 struct Args {
@@ -59,20 +61,46 @@ Args parse_args(int argc, char** argv) {
     return a;
 }
 
+// The manifest is a contract; reject anything we would otherwise silently
+// misinterpret so a bad model directory fails at startup, not per request.
 Manifest load_manifest(const fs::path& dir) {
     std::ifstream f(dir / "manifest.json");
     if (!f) throw std::runtime_error("manifest.json not found in " + dir.string());
     json j; f >> j;
     Manifest m;
     m.task = j.at("task").get<std::string>();
+    if (m.task != "text-classification" && m.task != "token-classification") {
+        throw std::runtime_error("unsupported task in manifest.json: '" + m.task +
+                                 "' (expected text-classification or token-classification)");
+    }
+    if (j.contains("score_normalization") && j["score_normalization"].is_string()) {
+        m.score_normalization = j["score_normalization"].get<std::string>();
+    }
+    if (m.score_normalization != "softmax" && m.score_normalization != "sigmoid" &&
+        m.score_normalization != "none") {
+        throw std::runtime_error("unsupported score_normalization: " + m.score_normalization);
+    }
     // token_aggregation is null for sequence-classification; tolerate null/absent.
     if (j.contains("token_aggregation") && j["token_aggregation"].is_string()) {
         m.token_aggregation = j["token_aggregation"].get<std::string>();
     }
+    if (m.task == "token-classification" &&
+        m.token_aggregation != "max" && m.token_aggregation != "mean") {
+        throw std::runtime_error("unsupported token_aggregation: " + m.token_aggregation);
+    }
+    if (j.contains("max_length") && j["max_length"].is_number_integer()) {
+        m.max_length = j["max_length"].get<int>();
+        if (m.max_length < 2) throw std::runtime_error("max_length must be >= 2");
+    }
     const auto& id2label = j.at("id2label");
+    if (id2label.empty()) throw std::runtime_error("id2label is empty in manifest.json");
     m.id2label.resize(id2label.size());
     for (auto it = id2label.begin(); it != id2label.end(); ++it) {
-        m.id2label[std::stoul(it.key())] = it.value().get<std::string>();
+        size_t idx = std::stoul(it.key());
+        if (idx >= m.id2label.size()) {
+            throw std::runtime_error("id2label keys must be contiguous 0..n-1");
+        }
+        m.id2label[idx] = it.value().get<std::string>();
     }
     return m;
 }
@@ -83,6 +111,17 @@ std::vector<float> softmax(const float* v, size_t n) {
     double sum = 0;
     for (size_t i = 0; i < n; ++i) { out[i] = std::exp(v[i] - mx); sum += out[i]; }
     for (auto& x : out) x = static_cast<float>(x / sum);
+    return out;
+}
+
+std::vector<float> normalize(const float* v, size_t n, const std::string& mode) {
+    if (mode == "softmax") return softmax(v, n);
+    std::vector<float> out(n);
+    if (mode == "sigmoid") {
+        for (size_t i = 0; i < n; ++i) out[i] = 1.0f / (1.0f + std::exp(-v[i]));
+    } else {
+        std::copy(v, v + n, out.begin());
+    }
     return out;
 }
 
@@ -117,8 +156,17 @@ public:
     json classify(const std::string& text, int top_k) {
         std::vector<int32_t> ids32 = tokenizer_->Encode(text);
         std::vector<int64_t> input_ids(ids32.begin(), ids32.end());
+        if (input_ids.empty()) throw std::runtime_error("empty tokenization");
+
+        // Truncate to the manifest's token budget, keeping the trailing token
+        // (usually [SEP] / </s>) so the sequence stays well-formed.
+        const size_t max_len = static_cast<size_t>(manifest_.max_length);
+        if (input_ids.size() > max_len) {
+            int64_t last = input_ids.back();
+            input_ids.resize(max_len - 1);
+            input_ids.push_back(last);
+        }
         const int64_t seq_len = static_cast<int64_t>(input_ids.size());
-        if (seq_len == 0) throw std::runtime_error("empty tokenization");
 
         // Standard encoder inputs: attention_mask all-ones, token_type_ids all-zeros.
         std::vector<int64_t> attention_mask(input_ids.size(), 1);
@@ -153,20 +201,39 @@ public:
         auto out_shape = outputs[0].GetTensorTypeAndShapeInfo().GetShape();
         const size_t num_labels = manifest_.id2label.size();
 
+        // Guard against a model/manifest mismatch before indexing the buffer.
+        if (out_shape.empty() || out_shape.back() < 0 ||
+            static_cast<size_t>(out_shape.back()) != num_labels) {
+            throw std::runtime_error(
+                "model output last dimension (" +
+                std::to_string(out_shape.empty() ? -1 : out_shape.back()) +
+                ") does not match manifest id2label size (" + std::to_string(num_labels) + ")");
+        }
+
         std::map<std::string, float> scores;
         if (manifest_.task == "token-classification") {
-            // out_shape = [1, tokens, labels]; report the max probability per
-            // label across tokens (a routing-friendly presence signal).
-            const size_t tokens = out_shape.size() >= 2 ? static_cast<size_t>(out_shape[out_shape.size() - 2]) : 0;
+            // out_shape = [1, tokens, labels]; aggregate per-label across
+            // tokens per the manifest (a routing-friendly presence signal).
+            if (out_shape.size() < 3) {
+                throw std::runtime_error("token-classification model must output [batch, tokens, labels]");
+            }
+            const size_t tokens = static_cast<size_t>(out_shape[out_shape.size() - 2]);
+            const bool mean = manifest_.token_aggregation == "mean";
+            std::vector<double> agg(num_labels, 0.0);
             for (size_t t = 0; t < tokens; ++t) {
-                auto p = softmax(logits + t * num_labels, num_labels);
+                auto p = normalize(logits + t * num_labels, num_labels, manifest_.score_normalization);
                 for (size_t l = 0; l < num_labels; ++l) {
-                    scores[manifest_.id2label[l]] = std::max(scores[manifest_.id2label[l]], p[l]);
+                    if (mean) agg[l] += p[l];
+                    else agg[l] = std::max(agg[l], static_cast<double>(p[l]));
                 }
             }
+            for (size_t l = 0; l < num_labels; ++l) {
+                scores[manifest_.id2label[l]] =
+                    static_cast<float>(mean && tokens > 0 ? agg[l] / tokens : agg[l]);
+            }
         } else {
-            // sequence-classification: softmax over the label logits.
-            auto p = softmax(logits, num_labels);
+            // sequence-classification: normalize the label logits.
+            auto p = normalize(logits, num_labels, manifest_.score_normalization);
             for (size_t l = 0; l < num_labels; ++l) scores[manifest_.id2label[l]] = p[l];
         }
 
@@ -201,14 +268,22 @@ int main(int argc, char** argv) {
             res.set_content("{\"status\":\"ok\"}", "application/json");
         });
         srv.Post("/classify", [&](const httplib::Request& req, httplib::Response& res) {
+            std::string text;
+            int top_k = 0;
             try {
                 json body = json::parse(req.body);
-                std::string text = body.contains("text") ? body.at("text").get<std::string>()
-                                                          : body.at("input").get<std::string>();
-                int top_k = body.value("top_k", 0);
-                res.set_content(model.classify(text, top_k).dump(), "application/json");
+                text = body.contains("text") ? body.at("text").get<std::string>()
+                                             : body.at("input").get<std::string>();
+                top_k = body.value("top_k", 0);
             } catch (const std::exception& e) {
                 res.status = 400;
+                res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+                return;
+            }
+            try {
+                res.set_content(model.classify(text, top_k).dump(), "application/json");
+            } catch (const std::exception& e) {
+                res.status = 500;
                 res.set_content(json{{"error", e.what()}}.dump(), "application/json");
             }
         });

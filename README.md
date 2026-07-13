@@ -4,7 +4,7 @@ A generic, self-contained **ONNX Runtime model server** for [Lemonade](https://g
 
 **Consumer:** lemonade [#2592](https://github.com/lemonade-sdk/lemonade/issues/2592) — the router's `classifier` condition type. Classification is the first capability; the server is intentionally generic so embeddings and reranking can follow.
 
-> Status: **initial scaffold** — not yet built/released. See [#2592](https://github.com/lemonade-sdk/lemonade/issues/2592).
+> Status: **experimental** — released and consumed by Lemonade's `onnxruntime` backend. See [#2592](https://github.com/lemonade-sdk/lemonade/issues/2592).
 
 ## Scope
 
@@ -31,13 +31,15 @@ model-dir/
   manifest.json
 ```
 
-`manifest.json`:
+`manifest.json` (validated at startup — unknown values are a startup error, and
+the model's output dimension must match `id2label` at inference time):
 ```json
 {
   "task": "text-classification",        // or "token-classification"
   "id2label": {"0": "SAFE", "1": "INJECTION"},
-  "score_normalization": "softmax",
-  "token_aggregation": null              // "first-subword" | "max" for token-classification
+  "score_normalization": "softmax",     // "softmax" (default) | "sigmoid" | "none"
+  "token_aggregation": null,            // token-classification: "max" (default) | "mean"
+  "max_length": 512                     // optional token budget; longer inputs are truncated
 }
 ```
 
@@ -79,4 +81,5 @@ ort-server-<version>-macos-arm64.tar.gz
 
 ## License
 
-TODO: adopt the lemonade-sdk project license before first public release.
+[Apache-2.0](LICENSE). Release archives bundle the ONNX Runtime shared library
+and statically link the tokenizer stack; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

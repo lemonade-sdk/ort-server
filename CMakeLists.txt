@@ -71,3 +71,12 @@ else()
   file(GLOB _ort_libs "${ORT_ROOT}/lib/libonnxruntime.*")
   target_link_libraries(ort-server PRIVATE ${_ort_libs})
 endif()
+
+# The release archive is flat (binary + libonnxruntime side by side); make the
+# packaged binary resolve the bundled library relative to itself. BUILD_RPATH
+# appends to the automatic build-tree rpath, so build-dir runs keep working.
+if(APPLE)
+  set_target_properties(ort-server PROPERTIES BUILD_RPATH "@loader_path")
+elseif(UNIX)
+  set_target_properties(ort-server PROPERTIES BUILD_RPATH "$ORIGIN")
+endif()
