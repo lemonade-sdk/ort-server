@@ -289,6 +289,19 @@ def main():
         out = s.stop()
         check("H: unsupported model_type rejected", not ready, out[-200:])
 
+    # H3: a truncated tokenizer.json must be a clean startup error, not a Rust
+    # panic across the FFI (which aborts with no usable message).
+    corrupt = variant(clf, tmp, "corrupttok")
+    (corrupt / "tokenizer.json").write_text("")
+    with Server(binary, corrupt) as s:
+        ready = s.wait_ready(timeout=10)
+        out = s.stop()
+        check(
+            "H: corrupt tokenizer.json reports a clean error",
+            not ready and "not valid JSON" in out,
+            out[-200:],
+        )
+
     # I: model output dim vs id2label mismatch is a clean 500
     with Server(
         binary, variant(clf, tmp, "dim", {"id2label": {"0": "A", "1": "B", "2": "C"}})

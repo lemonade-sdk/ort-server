@@ -322,6 +322,20 @@ public:
         : env_(ORT_LOGGING_LEVEL_WARNING, "ort-server"), manifest_(load_manifest(dir)) {
         (void)verbose;
         std::string blob = load_bytes(dir / "tokenizer.json");
+
+        // Parse BEFORE handing the blob to the Rust tokenizer: it unwraps its
+        // parse Result, so a truncated or corrupt tokenizer.json (a partial
+        // download, say) panics across the FFI and aborts the process with no
+        // usable message. Fail cleanly instead.
+        json tj;
+        try {
+            tj = json::parse(blob);
+        } catch (const std::exception& e) {
+            throw std::runtime_error("tokenizer.json in " + dir.string() +
+                                     " is not valid JSON (truncated or corrupt "
+                                     "download?): " + e.what());
+        }
+
         tokenizer_ = tokenizers_new_from_str(blob.data(), blob.size());
         if (!tokenizer_) throw std::runtime_error("failed to load tokenizer.json from " + dir.string());
 
@@ -330,14 +344,10 @@ public:
         // default, so those trailing [PAD] ids must be dropped. Feeding them to
         // the model (under our all-ones attention mask) makes it attend to
         // padding as if it were text and silently corrupts the scores.
-        try {
-            json tj = json::parse(blob);
-            if (tj.contains("padding") && tj["padding"].is_object() &&
-                tj["padding"].contains("pad_id") &&
-                tj["padding"]["pad_id"].is_number_integer()) {
-                pad_id_ = tj["padding"]["pad_id"].get<int64_t>();
-            }
-        } catch (const std::exception&) {
+        if (tj.contains("padding") && tj["padding"].is_object() &&
+            tj["padding"].contains("pad_id") &&
+            tj["padding"]["pad_id"].is_number_integer()) {
+            pad_id_ = tj["padding"]["pad_id"].get<int64_t>();
         }
 
         Ort::SessionOptions opts;
