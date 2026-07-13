@@ -64,10 +64,9 @@ Future capabilities (same server, new endpoints): `POST /embed`, `POST /rerank`.
 
 `tools/classifier_catalog/` holds the Python tooling that produces the
 lemonade-sdk HF catalog for this server: `export.py` (Optimum export +
-manifest + parity validation vs the PyTorch reference), `publish.py`
-(fail-closed license allowlist + parity gates + model cards), and the
-exploratory `export_and_benchmark.py` harness. It lives in this repo so the
-manifest contract's producer and consumer version together.
+manifest + parity validation vs the PyTorch reference) and `publish.py`
+(fail-closed license allowlist + parity gates + model cards). It lives in
+this repo so the manifest contract's producer and consumer version together.
 
 ## Execution providers
 
