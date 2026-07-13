@@ -325,6 +325,21 @@ public:
         tokenizer_ = tokenizers_new_from_str(blob.data(), blob.size());
         if (!tokenizer_) throw std::runtime_error("failed to load tokenizer.json from " + dir.string());
 
+        // A tokenizer.json that carries a `padding` section pads every encoding
+        // out to a fixed width — the HuggingFace reference does NOT pad by
+        // default, so those trailing [PAD] ids must be dropped. Feeding them to
+        // the model (under our all-ones attention mask) makes it attend to
+        // padding as if it were text and silently corrupts the scores.
+        try {
+            json tj = json::parse(blob);
+            if (tj.contains("padding") && tj["padding"].is_object() &&
+                tj["padding"].contains("pad_id") &&
+                tj["padding"]["pad_id"].is_number_integer()) {
+                pad_id_ = tj["padding"]["pad_id"].get<int64_t>();
+            }
+        } catch (const std::exception&) {
+        }
+
         Ort::SessionOptions opts;
         opts.SetIntraOpNumThreads(0);
         session_ = Ort::Session(env_, (dir / "model.onnx").c_str(), opts);
@@ -359,6 +374,13 @@ public:
                               /*add_special_token=*/1, &result);
             input_ids.assign(result.token_ids, result.token_ids + result.len);
             tokenizers_free_encode_results(&result, 1);
+        }
+        // Drop the tokenizer's own padding so the model sees exactly what the
+        // HuggingFace reference sees (see pad_id_ in the constructor).
+        if (pad_id_ >= 0) {
+            while (input_ids.size() > 1 && input_ids.back() == pad_id_) {
+                input_ids.pop_back();
+            }
         }
         if (input_ids.empty()) throw std::runtime_error("empty tokenization");
 
@@ -465,6 +487,7 @@ private:
     Ort::Session session_{nullptr};
     Ort::AllocatorWithDefaultOptions alloc_;
     TokenizerHandle tokenizer_ = nullptr;
+    int64_t pad_id_ = -1;  // >= 0 when tokenizer.json enables padding
     std::mutex tokenizer_mutex_;
     std::vector<std::string> input_names_;
     std::vector<std::string> output_names_;

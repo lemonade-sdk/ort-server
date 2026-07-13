@@ -176,6 +176,21 @@ def main():
         check("A: 'input' alias works", st == 200 and len(scores_of(body)) == 2)
         check_golden(clf, "A: GOLDEN seq-cls")
 
+    # A2: a tokenizer.json with PADDING enabled (as real HF repos ship) must
+    # produce identical scores — the pad ids must never reach the model.
+    pad = HERE / "fixtures" / "tiny-pad"
+    with Server(binary, pad) as s:
+        check("A2: padded-tokenizer server ready", s.wait_ready())
+        st, body = request({"text": "hello world"})
+        p_scores = scores_of(body)
+        check(
+            "A2: padded tokenizer gives identical scores",
+            st == 200
+            and all(abs(p_scores.get(k, -1) - v) < 1e-6 for k, v in a_scores.items()),
+            f"{p_scores} != {a_scores}",
+        )
+        check_golden(pad, "A2: GOLDEN padded-tokenizer")
+
     # B: manifest-less — contract inferred from config.json
     with Server(binary, variant(clf, tmp, "noman", drop_manifest=True)) as s:
         check("B: server ready (config.json inference)", s.wait_ready())
