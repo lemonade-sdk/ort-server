@@ -107,6 +107,45 @@ def scores_of(body):
     return labels if isinstance(labels, dict) else {}
 
 
+GOLDEN_TOL = 1e-4
+
+
+def check_golden(fixture_dir, label):
+    """The oracle: ort-server must reproduce the HuggingFace reference scores.
+
+    Structural checks pass even when tokenization is wrong (that is how the
+    missing-special-tokens bug survived). These compare actual values against
+    HF-tokenizer + ONNX Runtime output for the same inputs, including a
+    truncated and a unicode case. Regenerate with fixtures/make_golden.py.
+    """
+    golden = json.loads((fixture_dir / "golden.json").read_text(encoding="utf-8"))
+    worst = 0.0
+    worst_case = ""
+    for case in golden["cases"]:
+        st, body = request({"text": case["text"]})
+        if st != 200:
+            check(f"{label}: golden request 200", False, f"status {st}: {body}")
+            return
+        got = scores_of(body)
+        expected = case["labels"]
+        if set(got) != set(expected):
+            check(
+                f"{label}: golden labels match",
+                False,
+                f"{sorted(got)} != {sorted(expected)}",
+            )
+            return
+        for k, v in expected.items():
+            delta = abs(got[k] - v)
+            if delta > worst:
+                worst, worst_case = delta, case["text"][:40]
+    check(
+        f"{label}: matches HuggingFace reference (max delta {worst:.2e})",
+        worst <= GOLDEN_TOL,
+        f"worst delta {worst:.3e} > {GOLDEN_TOL} on {worst_case!r}",
+    )
+
+
 def main():
     binary = str(Path(sys.argv[1]).resolve())
     clf = HERE / "fixtures" / "tiny-clf"
@@ -135,6 +174,7 @@ def main():
         check("A: missing text/input is 400", st == 400)
         st, body = request({"input": "hello world"})
         check("A: 'input' alias works", st == 200 and len(scores_of(body)) == 2)
+        check_golden(clf, "A: GOLDEN seq-cls")
 
     # B: manifest-less — contract inferred from config.json
     with Server(binary, variant(clf, tmp, "noman", drop_manifest=True)) as s:
@@ -186,6 +226,7 @@ def main():
             and all(0.0 <= v <= 1.0 for v in e_scores.values()),
             str(body),
         )
+        check_golden(tok, "E: GOLDEN token-cls")
     with Server(binary, variant(tok, tmp, "mean", {"token_aggregation": "mean"})) as s:
         check("F: token-cls mean ready", s.wait_ready())
         st, body = request({"text": "hello world again"})
@@ -223,6 +264,15 @@ def main():
             ready = s.wait_ready(timeout=10)
             out = s.stop()
             check(name, not ready, out[-200:])
+
+    # H2: an architecture whose mask/segment conventions we don't implement
+    # (XLNet et al.) must be refused, not silently mis-served.
+    with Server(
+        binary, variant(clf, tmp, "xlnet", config_edits={"model_type": "xlnet"})
+    ) as s:
+        ready = s.wait_ready(timeout=10)
+        out = s.stop()
+        check("H: unsupported model_type rejected", not ready, out[-200:])
 
     # I: model output dim vs id2label mismatch is a clean 500
     with Server(

@@ -29,6 +29,7 @@
 #include <iterator>
 #include <map>
 #include <memory>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -94,21 +95,81 @@ void parse_id2label(const json& id2label, Manifest& m, const std::string& origin
     }
 }
 
-// Best-effort: tokenizer_config.json is an optional refinement, so a missing
-// or malformed file never aborts startup.
-void apply_tokenizer_max_length(const fs::path& dir, Manifest& m) {
-    std::ifstream tf(dir / "tokenizer_config.json");
-    if (!tf) return;
+json read_json_if_present(const fs::path& p) {
+    std::ifstream f(p);
+    if (!f) return json::object();
     try {
-        json tj; tf >> tj;
+        json j; f >> j;
+        return j.is_object() ? j : json::object();
+    } catch (const std::exception&) {
+        return json::object();
+    }
+}
+
+// This server feeds the model a single sequence with a fabricated all-ones
+// attention mask and all-zero token_type_ids, and truncates by keeping the
+// trailing token. That is exactly right for BERT-family single-sequence
+// encoders and wrong for architectures with different segment/special-token
+// conventions (XLNet puts its classifier token last with a distinct segment
+// id), so the supported set is an explicit allowlist rather than a claim.
+const std::set<std::string>& supported_model_types() {
+    static const std::set<std::string> kSupported = {
+        "albert", "bert",     "camembert",  "deberta", "deberta-v2",
+        "distilbert", "electra", "roberta", "xlm-roberta",
+    };
+    return kSupported;
+}
+
+void validate_model_family(const json& config, const fs::path& dir) {
+    if (config.empty()) {
+        // No config.json: an explicit manifest is the user asserting the
+        // contract, and we cannot check the family. Proceed.
+        return;
+    }
+    std::string model_type;
+    if (config.contains("model_type") && config["model_type"].is_string()) {
+        model_type = config["model_type"].get<std::string>();
+    }
+    if (model_type.empty()) {
+        throw std::runtime_error("config.json in " + dir.string() +
+                                 " declares no model_type; cannot verify that this "
+                                 "architecture uses the single-sequence encoder "
+                                 "convention ort-server implements");
+    }
+    if (!supported_model_types().count(model_type)) {
+        std::string supported;
+        for (const auto& t : supported_model_types()) {
+            supported += (supported.empty() ? "" : ", ") + t;
+        }
+        throw std::runtime_error(
+            "unsupported model_type '" + model_type +
+            "'. ort-server implements the single-sequence encoder convention "
+            "(all-ones attention mask, all-zero token_type_ids, trailing-token "
+            "truncation), which is valid for: " + supported +
+            ". Other architectures need their own mask/segment handling.");
+    }
+}
+
+// max_length precedence mirrors the exporter: the tokenizer's declared budget,
+// then the model's position table (less 2 — RoBERTa-family configs declare
+// max_position_embeddings larger than the usable budget), then 512.
+void apply_inferred_max_length(const json& tokenizer_config, const json& config, Manifest& m) {
+    auto valid = [](const json& j, const char* key) -> int {
         // HF writes a huge sentinel (1e30) when the tokenizer has no real limit;
         // that parses as a double and is skipped by the integer check.
-        if (tj.contains("model_max_length") && tj["model_max_length"].is_number_integer()) {
-            auto n = tj["model_max_length"].get<long long>();
-            if (n >= 2 && n <= 1000000) m.max_length = static_cast<int>(n);
-        }
-    } catch (const std::exception&) {
+        if (!j.contains(key) || !j[key].is_number_integer()) return 0;
+        auto n = j[key].get<long long>();
+        return (n >= 2 && n <= 1000000) ? static_cast<int>(n) : 0;
+    };
+    if (int n = valid(tokenizer_config, "model_max_length")) {
+        m.max_length = n;
+        return;
     }
+    if (int n = valid(config, "max_position_embeddings")) {
+        m.max_length = n > 4 ? n - 2 : n;
+        return;
+    }
+    m.max_length = 512;
 }
 
 Manifest manifest_from_json(const fs::path& dir) {
@@ -116,6 +177,9 @@ Manifest manifest_from_json(const fs::path& dir) {
     if (!f) throw std::runtime_error("cannot open manifest.json in " + dir.string());
     json j; f >> j;
     Manifest m;
+    // Even with an explicit manifest, the tokenization/mask conventions below
+    // still have to hold for this architecture.
+    validate_model_family(read_json_if_present(dir / "config.json"), dir);
     m.task = j.at("task").get<std::string>();
     if (m.task != "text-classification" && m.task != "token-classification") {
         throw std::runtime_error("unsupported task in manifest.json: '" + m.task +
@@ -149,6 +213,11 @@ Manifest manifest_from_json(const fs::path& dir) {
         }
         m.max_length = j["max_length"].get<int>();
         if (m.max_length < 2) throw std::runtime_error("max_length must be >= 2");
+    } else {
+        // Manifest omits the budget: fall back to the model's own metadata
+        // rather than a blanket 512, which can overflow a smaller position table.
+        apply_inferred_max_length(read_json_if_present(dir / "tokenizer_config.json"),
+                                  read_json_if_present(dir / "config.json"), m);
     }
     parse_id2label(j.at("id2label"), m, "manifest.json");
     return m;
@@ -164,6 +233,7 @@ Manifest manifest_from_hf_config(const fs::path& dir) {
     }
     json j; f >> j;
     Manifest m;
+    validate_model_family(j, dir);
 
     std::string arch;
     if (j.contains("architectures") && j["architectures"].is_array() &&
@@ -183,6 +253,11 @@ Manifest manifest_from_hf_config(const fs::path& dir) {
                                  arch + "'; provide a manifest.json");
     }
 
+    // problem_type is only a training-time hint: models trained with BCE outside
+    // the HF Trainer routinely leave it null, so an absent value CANNOT be read
+    // as "single-label". Manifest-less inference therefore ASSUMES single-label
+    // softmax and says so; a multi-label model must declare it — either via
+    // problem_type in its config, or with an explicit manifest.json.
     std::string problem_type;
     if (j.contains("problem_type") && j["problem_type"].is_string()) {
         problem_type = j["problem_type"].get<std::string>();
@@ -190,15 +265,25 @@ Manifest manifest_from_hf_config(const fs::path& dir) {
     if (problem_type == "regression") {
         throw std::runtime_error("regression heads have no label scores in [0,1]");
     }
-    m.score_normalization = (m.task == "text-classification" &&
-                             problem_type == "multi_label_classification")
-                                ? "sigmoid" : "softmax";
+    if (m.task == "text-classification" && problem_type == "multi_label_classification") {
+        m.score_normalization = "sigmoid";
+    } else {
+        m.score_normalization = "softmax";
+        if (m.task == "text-classification" && problem_type.empty()) {
+            fprintf(stderr,
+                    "ort-server: config.json declares no problem_type; assuming "
+                    "SINGLE-LABEL softmax. If this is a multi-label (BCE-trained) "
+                    "model, supply a manifest.json with "
+                    "\"score_normalization\": \"sigmoid\" — otherwise the scores "
+                    "will be wrong.\n");
+        }
+    }
 
     parse_id2label(j.at("id2label"), m, "config.json");
     if (m.id2label.size() < 2) {
         throw std::runtime_error("single-output heads have no label scores in [0,1]");
     }
-    apply_tokenizer_max_length(dir, m);
+    apply_inferred_max_length(read_json_if_present(dir / "tokenizer_config.json"), j, m);
     return m;
 }
 

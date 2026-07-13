@@ -21,12 +21,25 @@ The server is thin, and a model is easy to bring: **a stock Optimum export runs
 as-is** — `optimum-cli export onnx --model <hf_id> <dir>` and point ort-server
 at the directory.
 
+**Supported architectures.** ort-server implements the *single-sequence encoder*
+convention: an all-ones attention mask, all-zero `token_type_ids`, and
+trailing-token truncation. That is correct for BERT, DistilBERT, RoBERTa,
+XLM-RoBERTa, DeBERTa (v1/v2), ELECTRA, ALBERT and CamemBERT, and **not** for
+architectures with different segment/special-token conventions (XLNet, for
+instance, puts its classifier token last with a distinct segment id). The
+supported set is an explicit allowlist checked against `config.json`'s
+`model_type` at startup — an unsupported model is **refused**, not served with
+silently wrong scores.
+
 - `model.onnx` is a plain export (`input_ids`/`attention_mask`[/`token_type_ids`] → logits) — the ordinary `optimum` export, no in-graph baking, no custom ops.
 - The server tokenizes at runtime by loading the model's `tokenizer.json` via [mlc-ai/tokenizers-cpp](https://github.com/mlc-ai/tokenizers-cpp) — the exact HuggingFace tokenizer, so parity is guaranteed.
 - The output contract (task, labels, normalization, token budget) is inferred
-  from the export's own `config.json` + `tokenizer_config.json`, honoring HF
-  `problem_type` semantics (`multi_label_classification` → sigmoid; regression
-  heads are rejected — no label scores in [0,1]).
+  from the export's own `config.json` + `tokenizer_config.json`. `problem_type`
+  is only a training-time hint, so manifest-less inference **assumes
+  single-label softmax**: a multi-label model must declare
+  `problem_type: multi_label_classification` or ship a manifest with
+  `"score_normalization": "sigmoid"`. Regression heads are rejected (no label
+  scores in [0,1]).
 - An optional **`manifest.json`** overrides the inference; when present it is
   the contract and is validated strictly.
 
