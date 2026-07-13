@@ -6,6 +6,7 @@ details recorded here (and reported by `GET /health`), not encoded in the
 
 | ort-server | ONNX Runtime | tokenizers-cpp |
 |------------|--------------|----------------|
+| 0.3.x      | 1.27.0       | main           |
 | 0.2.x      | 1.27.0       | main           |
 
 Tokenization uses [mlc-ai/tokenizers-cpp](https://github.com/mlc-ai/tokenizers-cpp)
