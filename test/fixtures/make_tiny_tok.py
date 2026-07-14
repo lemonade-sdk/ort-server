@@ -38,6 +38,20 @@ class TinyTok(torch.nn.Module):
 
 
 m = TinyTok().eval()
+
+# Make the special tokens ([CLS]=2, [SEP]=3) score ENT_B (label 2) near 1.0,
+# while content tokens stay middling. A server that aggregates special-token
+# positions — which the HuggingFace pipeline filters out — then reports
+# ENT_B≈1.0 and is caught by the golden comparison. Without this the fixture
+# cannot tell the two behaviours apart.
+with torch.no_grad():
+    m.emb.weight[:, 0] = 0.0  # feature 0 fires for special tokens ONLY
+    for special_id in (2, 3):
+        m.emb.weight[special_id].zero_()
+        m.emb.weight[special_id][0] = 10.0
+    m.head.weight[:, 0] = -5.0
+    m.head.weight[2, 0] = 5.0  # feature 0 -> ENT_B
+
 ids = torch.tensor([[2, 5, 9, 3]])
 mask = torch.ones_like(ids)
 torch.onnx.export(

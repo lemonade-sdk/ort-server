@@ -32,7 +32,15 @@ supported set is an explicit allowlist checked against `config.json`'s
 silently wrong scores.
 
 - `model.onnx` is a plain export (`input_ids`/`attention_mask`[/`token_type_ids`] → logits) — the ordinary `optimum` export, no in-graph baking, no custom ops.
-- The server tokenizes at runtime by loading the model's `tokenizer.json` via [mlc-ai/tokenizers-cpp](https://github.com/mlc-ai/tokenizers-cpp) — the exact HuggingFace tokenizer, so parity is guaranteed.
+- The server tokenizes at runtime by loading the model's `tokenizer.json` via [mlc-ai/tokenizers-cpp](https://github.com/mlc-ai/tokenizers-cpp), which is the same Rust tokenizer `transformers` uses.
+
+**What "parity" means here, precisely.** The tokenizer returns token ids only, so
+the attention mask, segment ids, padding handling and special-token filtering are
+reconstructed by this server to match the HuggingFace pipeline. That reconstruction
+is verified against HF-computed reference scores on every release
+(`test/fixtures/*/golden.json`), but it is only *valid* for the single-sequence
+encoder families in the allowlist below — it is not a general guarantee for "any
+HuggingFace classifier".
 - The output contract (task, labels, normalization, token budget) is inferred
   from the export's own `config.json` + `tokenizer_config.json`. `problem_type`
   is only a training-time hint, so manifest-less inference **assumes

@@ -39,6 +39,11 @@ using json = nlohmann::json;
 
 namespace {
 
+// A bad request, as opposed to a server/model fault: mapped to 400.
+struct InvalidInput : std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
+
 struct Manifest {
     std::string task;                   // "text-classification" | "token-classification"
     std::vector<std::string> id2label;  // index -> label
@@ -121,10 +126,17 @@ const std::set<std::string>& supported_model_types() {
 }
 
 void validate_model_family(const json& config, const fs::path& dir) {
+    // A manifest describes the OUTPUT contract (labels, normalization). It says
+    // nothing about the INPUT convention — attention mask, segment ids, special
+    // tokens — which is what this server hardcodes. So a manifest cannot excuse
+    // a missing config.json: without it we cannot know the architecture, and an
+    // unchecked one would be served with a fabricated mask that may not fit.
     if (config.empty()) {
-        // No config.json: an explicit manifest is the user asserting the
-        // contract, and we cannot check the family. Proceed.
-        return;
+        throw std::runtime_error(
+            "config.json is missing or unreadable in " + dir.string() +
+            ". It is required (even alongside a manifest.json) to confirm the "
+            "model uses the single-sequence encoder convention this server "
+            "implements.");
     }
     std::string model_type;
     if (config.contains("model_type") && config["model_type"].is_string()) {
@@ -339,6 +351,28 @@ public:
         tokenizer_ = tokenizers_new_from_str(blob.data(), blob.size());
         if (!tokenizer_) throw std::runtime_error("failed to load tokenizer.json from " + dir.string());
 
+        // Positions the tokenizer INSERTS ([CLS]/[SEP] from the post-processor
+        // template, plus padding). They belong in the model's INPUT — sequence
+        // classifiers pool [CLS] — but HuggingFace's token-classification
+        // pipeline drops them from its OUTPUT, so aggregating them would report
+        // entities the reference never does.
+        //
+        // Deliberately NOT every `added_token` marked special: [UNK] and [MASK]
+        // are special *tokens* but appear as ordinary content positions (an
+        // out-of-vocabulary word becomes [UNK] and HF still scores it), and
+        // HF's special_tokens_mask marks them 0.
+        if (tj.contains("post_processor") && tj["post_processor"].is_object()) {
+            const auto& pp = tj["post_processor"];
+            if (pp.contains("special_tokens") && pp["special_tokens"].is_object()) {
+                for (const auto& entry : pp["special_tokens"]) {
+                    if (!entry.is_object() || !entry.contains("ids")) continue;
+                    for (const auto& id : entry["ids"]) {
+                        if (id.is_number_integer()) special_ids_.insert(id.get<int64_t>());
+                    }
+                }
+            }
+        }
+
         // A tokenizer.json that carries a `padding` section pads every encoding
         // out to a fixed width — the HuggingFace reference does NOT pad by
         // default, so those trailing [PAD] ids must be dropped. Feeding them to
@@ -348,6 +382,7 @@ public:
             tj["padding"].contains("pad_id") &&
             tj["padding"]["pad_id"].is_number_integer()) {
             pad_id_ = tj["padding"]["pad_id"].get<int64_t>();
+            special_ids_.insert(pad_id_);
         }
 
         Ort::SessionOptions opts;
@@ -461,16 +496,26 @@ public:
             const size_t tokens = static_cast<size_t>(out_shape[out_shape.size() - 2]);
             const bool mean = manifest_.token_aggregation == "mean";
             std::vector<double> agg(num_labels, 0.0);
+            size_t counted = 0;
             for (size_t t = 0; t < tokens; ++t) {
+                // Skip [CLS]/[SEP]/… : the HuggingFace pipeline filters those
+                // positions out of its output, so scoring them would invent
+                // entities the reference never reports.
+                if (t < input_ids.size() && special_ids_.count(input_ids[t])) continue;
+                ++counted;
                 auto p = normalize(logits + t * num_labels, num_labels, manifest_.score_normalization);
                 for (size_t l = 0; l < num_labels; ++l) {
                     if (mean) agg[l] += p[l];
                     else agg[l] = std::max(agg[l], static_cast<double>(p[l]));
                 }
             }
+            if (counted == 0) {
+                throw InvalidInput("input has no content tokens to classify "
+                                   "(it tokenizes to special tokens only)");
+            }
             for (size_t l = 0; l < num_labels; ++l) {
                 scores[manifest_.id2label[l]] =
-                    static_cast<float>(mean && tokens > 0 ? agg[l] / tokens : agg[l]);
+                    static_cast<float>(mean ? agg[l] / counted : agg[l]);
             }
         } else {
             // sequence-classification: normalize the label logits.
@@ -498,6 +543,7 @@ private:
     Ort::AllocatorWithDefaultOptions alloc_;
     TokenizerHandle tokenizer_ = nullptr;
     int64_t pad_id_ = -1;  // >= 0 when tokenizer.json enables padding
+    std::set<int64_t> special_ids_;
     std::mutex tokenizer_mutex_;
     std::vector<std::string> input_names_;
     std::vector<std::string> output_names_;
@@ -532,6 +578,9 @@ int main(int argc, char** argv) {
             }
             try {
                 res.set_content(model.classify(text, top_k).dump(), "application/json");
+            } catch (const InvalidInput& e) {
+                res.status = 400;  // the request is at fault, not the model
+                res.set_content(json{{"error", e.what()}}.dump(), "application/json");
             } catch (const std::exception& e) {
                 res.status = 500;
                 res.set_content(json{{"error", e.what()}}.dump(), "application/json");

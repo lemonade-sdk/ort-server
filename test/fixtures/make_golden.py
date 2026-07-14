@@ -57,12 +57,25 @@ def main():
 
         cases = []
         for text in TEXTS:
-            enc = tok(text, return_tensors="np", truncation=True, max_length=max_length)
+            enc = tok(
+                text,
+                return_tensors="np",
+                truncation=True,
+                max_length=max_length,
+                return_special_tokens_mask=True,
+            )
+            special_mask = enc.pop("special_tokens_mask")[0].astype(bool)
             feeds = {k: v for k, v in enc.items() if k in in_names}
             logits = sess.run(None, feeds)[0][0]
             if manifest["task"] == "token-classification":
                 probs = normalize(logits)  # [tokens, labels]
-                agg = probs.max(axis=0) if token_agg == "max" else probs.mean(axis=0)
+                # The HuggingFace token-classification pipeline drops special
+                # tokens ([CLS]/[SEP]) from its output, so they must not be
+                # aggregated here either.
+                content = probs[~special_mask]
+                agg = (
+                    content.max(axis=0) if token_agg == "max" else content.mean(axis=0)
+                )
             else:
                 agg = normalize(logits)
             cases.append(
