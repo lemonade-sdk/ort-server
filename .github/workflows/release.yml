@@ -122,6 +122,20 @@ jobs:
           # aggregation, truncation, top_k, validation 400s, startup rejects.
           python3 test/smoke.py "$BIN"
 
+      # A binary that links whatever happened to be installed on the build
+      # machine (OpenSSL, zlib) runs here and dies with STATUS_DLL_NOT_FOUND on
+      # a clean host. Enforce that the packaged binary is self-contained.
+      - name: Check the packaged binary is self-contained
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            python3 -m pip install --quiet pefile
+            BIN="smoke/ort-server.exe"
+          else
+            BIN="smoke/ort-server"
+          fi
+          python3 test/check_deps.py "$BIN"
+
       - uses: actions/upload-artifact@v4
         with:
           name: ort-server-${{ matrix.platform }}

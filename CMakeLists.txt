@@ -10,6 +10,14 @@ set(ONNXRUNTIME_VERSION "1.27.0" CACHE STRING "ONNX Runtime version")
 include(FetchContent)
 
 # --- Header-only deps -------------------------------------------------------
+# httplib auto-links OpenSSL/zlib/brotli when it finds them on the BUILD machine,
+# which silently makes the release binary depend on DLLs we do not ship — it then
+# dies with STATUS_DLL_NOT_FOUND on any host without them. ort-server serves plain
+# HTTP on localhost and needs none of it. (Enforced by the dependency check in the
+# release workflow.)
+set(HTTPLIB_USE_OPENSSL_IF_AVAILABLE OFF CACHE BOOL "" FORCE)
+set(HTTPLIB_USE_ZLIB_IF_AVAILABLE OFF CACHE BOOL "" FORCE)
+set(HTTPLIB_USE_BROTLI_IF_AVAILABLE OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(httplib
   GIT_REPOSITORY https://github.com/yhirose/cpp-httplib.git
   GIT_TAG a7bc00e3307fecdb4d67545e93be7b88cfb1e186)  # v0.18.3
