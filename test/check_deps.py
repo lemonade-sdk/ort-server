@@ -54,9 +54,10 @@ UNIX_ALLOWED_PREFIXES = (
     "linux-vdso",
     "libSystem.",  # macOS
     "libc++.",
-    "/usr/lib/libSystem",
-    "/usr/lib/libc++",
 )
+
+# Frameworks that ship with macOS itself.
+MACOS_ALLOWED_PATH_PREFIXES = ("/System/Library/Frameworks/", "/usr/lib/")
 
 
 def windows_deps(binary):
@@ -93,14 +94,15 @@ def main():
         ]
     else:
         deps = unix_deps(binary)
-        bad = [
-            d
-            for d in deps
-            if not any(
-                Path(d).name.startswith(p) or d.startswith(p)
-                for p in UNIX_ALLOWED_PREFIXES
-            )
-        ]
+
+        def allowed(d):
+            if any(Path(d).name.startswith(p) for p in UNIX_ALLOWED_PREFIXES):
+                return True
+            if sys.platform == "darwin":
+                return d.startswith(MACOS_ALLOWED_PATH_PREFIXES)
+            return False
+
+        bad = [d for d in deps if not allowed(d)]
 
     print("dependencies:")
     for d in deps:
