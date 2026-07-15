@@ -328,6 +328,36 @@ std::string load_bytes(const fs::path& p) {
     return std::string(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
 }
 
+// Collect the token ids the post-processor INSERTS ([CLS]/[SEP], <s>/</s>, …).
+// The HF tokenizer serializes these three ways, and a "Sequence" can nest them:
+//   TemplateProcessing  -> special_tokens[*].ids   (modern BERT/DistilBERT)
+//   BertProcessing      -> cls / sep = [token, id]
+//   RobertaProcessing   -> cls / sep = [token, id]  (stock RoBERTa; different shape)
+// Reading only TemplateProcessing would silently miss RoBERTa's <s>/</s>, leaving
+// them in token-classification aggregation that HF's pipeline drops.
+void collect_inserted_special_ids(const json& pp, std::set<int64_t>& out) {
+    if (!pp.is_object()) return;
+    const std::string type = pp.value("type", "");
+    if (type == "Sequence" && pp.contains("processors") && pp["processors"].is_array()) {
+        for (const auto& child : pp["processors"]) collect_inserted_special_ids(child, out);
+        return;
+    }
+    if (pp.contains("special_tokens") && pp["special_tokens"].is_object()) {
+        for (const auto& entry : pp["special_tokens"]) {
+            if (!entry.is_object() || !entry.contains("ids")) continue;
+            for (const auto& id : entry["ids"]) {
+                if (id.is_number_integer()) out.insert(id.get<int64_t>());
+            }
+        }
+    }
+    for (const char* field : {"cls", "sep"}) {
+        if (pp.contains(field) && pp[field].is_array() && pp[field].size() == 2 &&
+            pp[field][1].is_number_integer()) {
+            out.insert(pp[field][1].get<int64_t>());
+        }
+    }
+}
+
 class Model {
 public:
     Model(const fs::path& dir, bool verbose)
@@ -361,16 +391,8 @@ public:
         // are special *tokens* but appear as ordinary content positions (an
         // out-of-vocabulary word becomes [UNK] and HF still scores it), and
         // HF's special_tokens_mask marks them 0.
-        if (tj.contains("post_processor") && tj["post_processor"].is_object()) {
-            const auto& pp = tj["post_processor"];
-            if (pp.contains("special_tokens") && pp["special_tokens"].is_object()) {
-                for (const auto& entry : pp["special_tokens"]) {
-                    if (!entry.is_object() || !entry.contains("ids")) continue;
-                    for (const auto& id : entry["ids"]) {
-                        if (id.is_number_integer()) special_ids_.insert(id.get<int64_t>());
-                    }
-                }
-            }
+        if (tj.contains("post_processor")) {
+            collect_inserted_special_ids(tj["post_processor"], special_ids_);
         }
 
         // A tokenizer.json that carries a `padding` section pads every encoding

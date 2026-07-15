@@ -150,6 +150,7 @@ def main():
     binary = str(Path(sys.argv[1]).resolve())
     clf = HERE / "fixtures" / "tiny-clf"
     tok = HERE / "fixtures" / "tiny-tok"
+    rtok = HERE / "fixtures" / "tiny-roberta-tok"
     tmp = tempfile.mkdtemp(prefix="ort-smoke-")
 
     # A: sequence classification, explicit manifest (softmax)
@@ -251,6 +252,13 @@ def main():
             st == 200
             and any(abs(f_scores.get(k, 0) - v) > 1e-6 for k, v in e_scores.items()),
         )
+
+    # F2: token-cls with a RobertaProcessing post-processor. Its inserted
+    # <s>/</s> live in cls/sep fields, not the TemplateProcessing special_tokens
+    # map; the golden here fails unless the server drops those positions.
+    with Server(binary, rtok) as s:
+        check("F2: roberta token-cls ready", s.wait_ready())
+        check_golden(rtok, "F2: GOLDEN roberta token-cls")
 
     # G: token-cls manifest-less (task inferred from architectures)
     with Server(binary, variant(tok, tmp, "toknoman", drop_manifest=True)) as s:

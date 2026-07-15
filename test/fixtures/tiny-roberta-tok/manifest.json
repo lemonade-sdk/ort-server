@@ -1,0 +1,11 @@
+{
+  "task": "token-classification",
+  "id2label": {
+    "0": "O",
+    "1": "ENT_A",
+    "2": "ENT_B"
+  },
+  "score_normalization": "softmax",
+  "token_aggregation": "max",
+  "max_length": 512
+}

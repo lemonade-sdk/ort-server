@@ -20,7 +20,7 @@ import onnxruntime as ort
 from transformers import AutoTokenizer
 
 HERE = Path(__file__).parent
-FIXTURES = ["tiny-clf", "tiny-tok"]
+FIXTURES = ["tiny-clf", "tiny-tok", "tiny-roberta-tok"]
 
 # Short, long (forces truncation), and unicode/punctuation-heavy inputs.
 TEXTS = [

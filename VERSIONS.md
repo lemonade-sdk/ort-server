@@ -7,7 +7,8 @@ not encoded in the `ort-server` version. See
 
 | ort-server | ONNX Runtime | tokenizers-cpp |
 |------------|--------------|----------------|
-| 0.3.6+     | 1.27.0       | c586c52 (pinned) |
+| 0.3.7+     | 1.27.0       | c586c52 (pinned) |
+| 0.3.6      | 1.27.0       | c586c52 (pinned) |
 | 0.3.5      | 1.27.0       | c586c52 (pinned) |
 | 0.3.4      | 1.27.0       | c586c52 (pinned) — **not self-contained on Windows (OpenSSL DLLs)** |
 | 0.3.3      | 1.27.0       | c586c52 (pinned) |
