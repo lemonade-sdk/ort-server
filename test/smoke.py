@@ -146,11 +146,48 @@ def check_golden(fixture_dir, label):
     )
 
 
+def check_router_golden(fixture_dir, label):
+    """Same oracle as check_golden, for the per-request-label task.
+
+    The reference here is Lfm2BidirForSequenceRouting.route(), transcribed in
+    fixtures/make_tiny_router.py. Structural checks would pass on grids built
+    from byte offsets instead of character offsets, or on the zero-filled grids
+    the reference falls back to; these values do not.
+    """
+    golden = json.loads((fixture_dir / "golden.json").read_text(encoding="utf-8"))
+    worst = 0.0
+    worst_case = ""
+    for case in golden["cases"]:
+        st, body = request({"text": case["text"], "labels": case["labels"]})
+        if st != 200:
+            check(f"{label}: golden request 200", False, f"status {st}: {body}")
+            return
+        got = scores_of(body)
+        expected = case["scores"]
+        if set(got) != set(expected):
+            check(
+                f"{label}: golden labels match",
+                False,
+                f"{sorted(got)} != {sorted(expected)}",
+            )
+            return
+        for k, v in expected.items():
+            delta = abs(got[k] - v)
+            if delta > worst:
+                worst, worst_case = delta, case["text"][:40]
+    check(
+        f"{label}: matches route() reference (max delta {worst:.2e})",
+        worst <= GOLDEN_TOL,
+        f"worst delta {worst:.3e} > {GOLDEN_TOL} on {worst_case!r}",
+    )
+
+
 def main():
     binary = str(Path(sys.argv[1]).resolve())
     clf = HERE / "fixtures" / "tiny-clf"
     tok = HERE / "fixtures" / "tiny-tok"
     rtok = HERE / "fixtures" / "tiny-roberta-tok"
+    router = HERE / "fixtures" / "tiny-router"
     tmp = tempfile.mkdtemp(prefix="ort-smoke-")
 
     # A: sequence classification, explicit manifest (softmax)
@@ -317,6 +354,98 @@ def main():
         check("I: dim-mismatch server ready", s.wait_ready())
         st, body = request({"text": "hi"})
         check("I: mismatch is 500 with error", st == 500 and "error" in body, str(body))
+
+    # J: zero-shot routing. The labels arrive per request, so the server builds
+    # the two pooling grids the model needs from the tokenizer's character
+    # offsets. The golden covers non-ASCII and emoji labels, a label that is a
+    # prefix of another, and text that imitates the prompt template.
+    with Server(binary, router) as s:
+        check("J: router ready", s.wait_ready())
+        check_router_golden(router, "J: GOLDEN router")
+
+        st, body = request({"text": "hello world", "labels": ["code", "chat"]})
+        r_scores = scores_of(body)
+        check("J: 200 with a score per label", st == 200 and len(r_scores) == 2, str(body))
+        check("J: router softmax sums to 1", abs(sum(r_scores.values()) - 1.0) < 1e-3)
+        best = max(r_scores, key=r_scores.get)
+        st, body = request({"text": "hello world", "labels": ["code", "chat"], "top_k": 1})
+        check(
+            "J: top_k=1 returns the winner",
+            st == 200 and list(scores_of(body)) == [best],
+            str(body),
+        )
+
+        # Request validation: every one of these is the caller's mistake, so 400.
+        for payload, name in [
+            ({"text": "hi"}, "J: router without labels is 400"),
+            ({"text": "hi", "labels": []}, "J: empty labels is 400"),
+            ({"text": "hi", "labels": ["a", "a"]}, "J: duplicate labels is 400"),
+            ({"text": "hi", "labels": ["a", "  "]}, "J: whitespace-only label is 400"),
+            ({"text": "hi", "labels": "code"}, "J: non-array labels is 400"),
+            ({"text": "hi", "labels": ["a", 7]}, "J: non-string label is 400"),
+            ({"text": "", "labels": ["a", "b"]}, "J: empty text is 400"),
+        ]:
+            st, body = request(payload)
+            check(name, st == 400, f"status {st}: {body}")
+
+    # J2: a fixed-label model must refuse a per-request label list rather than
+    # ignoring it and answering with its own labels.
+    with Server(binary, clf) as s:
+        check("J2: fixed-label server ready", s.wait_ready())
+        st, body = request({"text": "hello world", "labels": ["a", "b"]})
+        check("J2: labels on a fixed-label model is 400", st == 400, f"{st}: {body}")
+
+    # K: manifest-less router. The task comes from the architecture name, and
+    # the token budget from tokenizer.json's truncation rule — NOT from
+    # config.json, whose max_position_embeddings is 128000 here (as in the real
+    # model). Inferring from config.json would mean never truncating.
+    with Server(binary, variant(router, tmp, "routernoman", drop_manifest=True)) as s:
+        check("K: router config.json inference ready", s.wait_ready())
+        check_router_golden(router, "K: GOLDEN inferred router")
+
+    # L: the two architecture allowlists are separate, and BOTH directions are
+    # refused — an encoder is not a router, and a router is not an encoder.
+    with Server(
+        binary, variant(router, tmp, "routerbert", config_edits={"model_type": "bert"})
+    ) as s:
+        ready = s.wait_ready(timeout=10)
+        out = s.stop()
+        check("L: bert rejected for zero-shot", not ready, out[-200:])
+    with Server(
+        binary, variant(clf, tmp, "clflfm2", config_edits={"model_type": "lfm2"})
+    ) as s:
+        ready = s.wait_ready(timeout=10)
+        out = s.stop()
+        check("L: lfm2 rejected for text-classification", not ready, out[-200:])
+
+    # M: a window too small for the label list must be a 400 naming the label
+    # that overran it. The reference zero-fills that row instead and returns a
+    # confident score for a label the model never read.
+    # The fixture tokenizes one byte per token, so this request is 56 tokens in
+    # a 32-token window: "alpha" and "beta" fit whole, "gamma" is cut mid-label
+    # (it keeps enough tokens to be pooled), and "delta" gets nothing at all.
+    with Server(binary, variant(router, tmp, "routertiny", {"max_length": 32})) as s:
+        check("M: narrow-window router ready", s.wait_ready())
+        st, body = request(
+            {"text": "hello", "labels": ["alpha", "beta", "gamma", "delta"]}
+        )
+        err = body.get("error", "")
+        check("M: overrun window is 400", st == 400, f"status {st}: {body}")
+        check("M: the 400 names the squeezed-out label", "delta" in err, err)
+        # The same server still answers a request that fits (29 tokens).
+        st, body = request({"text": "hello", "labels": ["a"]})
+        check("M: a fitting request still works", st == 200, f"status {st}: {body}")
+
+    # N: manifest fields that contradict what a router IS are startup errors,
+    # not fields to ignore.
+    for edits, name in [
+        ({"id2label": {"0": "A", "1": "B"}}, "N: id2label on a router rejected"),
+        ({"score_normalization": "sigmoid"}, "N: sigmoid on a router rejected"),
+    ]:
+        with Server(binary, variant(router, tmp, "routerbad" + name[3:8], edits)) as s:
+            ready = s.wait_ready(timeout=10)
+            out = s.stop()
+            check(name, not ready, out[-200:])
 
     shutil.rmtree(tmp, ignore_errors=True)
     if FAILURES:

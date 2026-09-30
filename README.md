@@ -29,13 +29,15 @@ architectures with different segment/special-token conventions (XLNet, for
 instance, puts its classifier token last with a distinct segment id). The
 supported set is an explicit allowlist checked against `config.json`'s
 `model_type` at startup — an unsupported model is **refused**, not served with
-silently wrong scores.
+silently wrong scores. The allowlist is **per task**: zero-shot routing uses a
+different input convention entirely, so it has its own list and the two do not
+mix in either direction.
 
 - `model.onnx` is a plain export (`input_ids`/`attention_mask`[/`token_type_ids`] → logits) — the ordinary `optimum` export, no in-graph baking, no custom ops.
-- The server tokenizes at runtime by loading the model's `tokenizer.json` via [mlc-ai/tokenizers-cpp](https://github.com/mlc-ai/tokenizers-cpp), which is the same Rust tokenizer `transformers` uses.
+- The server tokenizes at runtime by loading the model's `tokenizer.json` through `third_party/tok_ffi`, a small C ABI over the [HuggingFace `tokenizers`](https://github.com/huggingface/tokenizers) crate — the same Rust tokenizer `transformers` uses.
 
-**What "parity" means here, precisely.** The tokenizer returns token ids only, so
-the attention mask, segment ids, padding handling and special-token filtering are
+**What "parity" means here, precisely.** The tokenizer's ids are exact, but the
+attention mask, segment ids, padding handling and special-token filtering are
 reconstructed by this server to match the HuggingFace pipeline. That reconstruction
 is verified against HF-computed reference scores on every release
 (`test/fixtures/*/golden.json`), but it is only *valid* for the single-sequence
@@ -72,12 +74,32 @@ error, and the model's output dimension must match `id2label` at inference time)
 }
 ```
 
+### Zero-shot routing
+
+`task: "zero-shot-classification"` takes its labels from **each request**
+instead of from a manifest, and scores them against the text on the fly:
+
+```
+POST /classify
+{"text": "Write a Python function that merges two sorted lists.",
+ "labels": ["code generation", "math reasoning", "creative writing"]}
+```
+
+Such a model reads the labels as part of its input text and needs two extra
+pooling inputs, built here from the tokenizer's character offsets. It has its
+own architecture allowlist, its own truncation rule, and refuses a request whose
+label list overruns the model's window rather than scoring a label it never
+read. See **[docs/ZERO-SHOT-ROUTER.md](docs/ZERO-SHOT-ROUTER.md)**.
+
 ## HTTP contract
 
 | Method | Path | Body | Response |
 |--------|------|------|----------|
 | GET | `/health` | — | `200` when the model is loaded and ready |
-| POST | `/classify` | `{"text": "...", "top_k": N?}` | `{"labels": {"<label>": <score in [0,1]>, ...}}` — `top_k` omitted or `0` returns all labels |
+| POST | `/classify` | `{"text": "...", "top_k": N?, "labels": [...]?}` | `{"labels": {"<label>": <score in [0,1]>, ...}}` — `top_k` omitted or `0` returns all labels |
+
+`labels` is required for a `zero-shot-classification` model and rejected for any
+other; both mismatches are a `400` rather than a silently ignored field.
 
 Future capabilities (same server, new endpoints): `POST /embed`, `POST /rerank`.
 
@@ -103,7 +125,7 @@ cmake --build build --config Release
 ./build/ort-server --model-path <model-dir> --port 8100
 ```
 
-CMake fetches ONNX Runtime, tokenizers-cpp, cpp-httplib, and nlohmann/json (see `CMakeLists.txt`). tokenizers-cpp builds a small Rust static lib, so **cargo/rustup must be on PATH** to build ort-server from source (build-time only — users of the prebuilt binary need nothing).
+CMake fetches ONNX Runtime, cpp-httplib, and nlohmann/json (see `CMakeLists.txt`) and builds `third_party/tok_ffi` in-tree. `tok_ffi` is a Rust static lib, so **cargo/rustup must be on PATH** to build ort-server from source (build-time only — users of the prebuilt binary need nothing).
 
 ## Releases
 

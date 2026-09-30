@@ -53,33 +53,70 @@ FetchContent_Declare(onnxruntime
 FetchContent_MakeAvailable(onnxruntime)
 set(ORT_ROOT "${onnxruntime_SOURCE_DIR}")
 
-# --- tokenizers-cpp (runtime HF tokenizer from tokenizer.json) -------------
+# --- tokenizer FFI (runtime HF tokenizer from tokenizer.json) --------------
 # Loads the model's own tokenizer.json (the exact HuggingFace tokenizer), so any
 # HF text classifier runs from a STANDARD ONNX export + its tokenizer.json — no
-# per-model in-graph baking, guaranteed tokenization parity. Builds a small Rust
-# static lib via cargo (present on CI runners and any dev with rustup); this is a
-# build-time dependency only — users of the prebuilt binary never see Rust.
-if(WIN32)
-  set(TOKENIZERS_CPP_MSVC_RUNTIME_LIBRARY "MD" CACHE STRING "" FORCE)
+# per-model in-graph baking, guaranteed tokenization parity.
+#
+# third_party/tok_ffi is a ~100-line C ABI over the HuggingFace `tokenizers`
+# crate. It passes through the character offsets the zero-shot router needs to
+# tell which tokens belong to which label (docs/ZERO-SHOT-ROUTER.md). Building
+# it needs cargo; users of the prebuilt binary never see Rust.
+find_program(CARGO_EXECUTABLE cargo
+  HINTS "$ENV{USERPROFILE}/.cargo/bin" "$ENV{HOME}/.cargo/bin")
+if(NOT CARGO_EXECUTABLE)
+  message(FATAL_ERROR
+    "cargo not found. ort-server builds a small Rust static library from "
+    "third_party/tok_ffi. Install rustup (https://rustup.rs) and re-run; this "
+    "is a build-time requirement only.")
 endif()
-FetchContent_Declare(tokenizers_cpp
-  GIT_REPOSITORY https://github.com/mlc-ai/tokenizers-cpp.git
-  GIT_TAG c586c52f93f7b060753bd2388eb96a105cb7374d)  # pinned main, 2026-07
-FetchContent_MakeAvailable(tokenizers_cpp)
+
+# Rust links the dynamic CRT (/MD) unless +crt-static is forced on, so pin the
+# C++ side to /MD too
+# ONNX Runtime as well.
+if(MSVC)
+  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
+endif()
+
+set(TOK_FFI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/tok_ffi")
+# Build under the binary dir so a configure-and-build never writes to the source
+# tree (and so a fresh build dir gets a fresh crate build).
+set(TOK_FFI_TARGET_DIR "${CMAKE_CURRENT_BINARY_DIR}/tok_ffi")
+set(TOK_FFI_LIB
+  "${TOK_FFI_TARGET_DIR}/release/${CMAKE_STATIC_LIBRARY_PREFIX}tok_ffi${CMAKE_STATIC_LIBRARY_SUFFIX}")
+
+add_custom_command(
+  OUTPUT "${TOK_FFI_LIB}"
+  COMMAND "${CARGO_EXECUTABLE}" build --release
+          --manifest-path "${TOK_FFI_DIR}/Cargo.toml"
+          --target-dir "${TOK_FFI_TARGET_DIR}"
+  DEPENDS "${TOK_FFI_DIR}/src/lib.rs"
+          "${TOK_FFI_DIR}/Cargo.toml"
+          "${TOK_FFI_DIR}/tok_ffi.h"
+  COMMENT "Building tokenizer FFI (Rust)"
+  VERBATIM)
+add_custom_target(tok_ffi_build DEPENDS "${TOK_FFI_LIB}")
 
 # --- Target -----------------------------------------------------------------
 add_executable(ort-server src/main.cpp)
+add_dependencies(ort-server tok_ffi_build)
 target_compile_definitions(ort-server PRIVATE
   ORT_SERVER_ONNXRUNTIME_VERSION="${ONNXRUNTIME_VERSION}")
 target_include_directories(ort-server PRIVATE
   "${ORT_ROOT}/include"
-  "${tokenizers_cpp_SOURCE_DIR}/include")
+  "${TOK_FFI_DIR}")
 target_link_libraries(ort-server PRIVATE
   httplib::httplib
   nlohmann_json::nlohmann_json
-  tokenizers_cpp)
+  "${TOK_FFI_LIB}")
 
 if(WIN32)
+  # The Rust standard library inside tok_ffi.lib needs these. Regenerate
+  # the list with:
+  #   cargo rustc --release --manifest-path third_party/tok_ffi/Cargo.toml -- \
+  #     --print native-static-libs
+  target_link_libraries(ort-server PRIVATE
+    kernel32 ntdll userenv ws2_32 dbghelp)
   target_link_libraries(ort-server PRIVATE "${ORT_ROOT}/lib/onnxruntime.lib")
   add_custom_command(TARGET ort-server POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
