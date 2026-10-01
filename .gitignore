@@ -5,3 +5,4 @@ dist/
 *.tar.gz
 build*/
 *.log
+third_party/tok_ffi/target/

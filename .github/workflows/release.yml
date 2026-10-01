@@ -30,7 +30,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # tokenizers-cpp builds a small Rust static lib via cargo.
+      # third_party/tok_ffi is a small Rust static lib, built via cargo.
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.88"  # pinned: the tokenizer stack is statically linked
@@ -56,14 +56,18 @@ jobs:
 
       # Use the runner's default CMake (Windows ships 4.x for VS 2026 support).
       # Pass CMAKE_POLICY_VERSION_MINIMUM via bash (PowerShell mangles "3.5" ->
-      # "3") so CMake 4.x accepts the old cmake_minimum_required in sentencepiece
-      # / protobuf / etc.
+      # "3") so CMake 4.x accepts any old cmake_minimum_required in a fetched
+      # dependency.
       - name: Configure
         shell: bash
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.5
 
       - name: Build
         run: cmake --build build --config Release --parallel
+
+      - name: Test tok_ffi
+        shell: bash
+        run: cargo test --release --locked --manifest-path third_party/tok_ffi/Cargo.toml --target-dir build/tok_ffi
 
       - name: Stage
         shell: bash
