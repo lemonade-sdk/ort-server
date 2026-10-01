@@ -9,16 +9,10 @@ at build time).
 | Component | License | Text in archive | Distribution |
 |-----------|---------|-----------------|--------------|
 | [ONNX Runtime](https://github.com/microsoft/onnxruntime) © Microsoft Corporation | MIT | `licenses/onnxruntime-LICENSE`, `licenses/onnxruntime-ThirdPartyNotices.txt` | Shared library bundled in the archive |
-| [tokenizers-cpp](https://github.com/mlc-ai/tokenizers-cpp) © tokenizers-cpp contributors | Apache-2.0 | `licenses/tokenizers-cpp-LICENSE` | Statically linked |
-| [HuggingFace tokenizers](https://github.com/huggingface/tokenizers) © HuggingFace | Apache-2.0 | `licenses/huggingface-tokenizers-LICENSE` | Statically linked (via tokenizers-cpp) |
+| [HuggingFace tokenizers](https://github.com/huggingface/tokenizers) © HuggingFace | Apache-2.0 | `licenses/huggingface-tokenizers-LICENSE` | Statically linked (via `third_party/tok_ffi`) |
 | [rust-onig / onig_sys](https://github.com/rust-onig/rust-onig) © rust-onig contributors | MIT | `licenses/rust-onig-LICENSE` | Statically linked (via HF tokenizers) |
 | [Oniguruma](https://github.com/kkos/oniguruma) © K. Kosako | BSD-2-Clause | `licenses/oniguruma-LICENSE` | Statically linked (vendored by onig_sys) |
-| [SentencePiece](https://github.com/google/sentencepiece) © Google | Apache-2.0 | `licenses/sentencepiece-LICENSE` | Statically linked (via tokenizers-cpp) |
-| [Abseil](https://github.com/abseil/abseil-cpp) © Google | Apache-2.0 | `licenses/abseil-cpp-LICENSE` | Statically linked (vendored by sentencepiece) |
-| [protobuf-lite](https://github.com/protocolbuffers/protobuf) © Google | BSD-3-Clause | `licenses/protobuf-lite-LICENSE` | Statically linked (vendored by sentencepiece) |
-| [Darts-clone](https://github.com/s-yata/darts-clone) © Susumu Yata | BSD-2-Clause | `licenses/darts_clone-LICENSE` | Statically linked (vendored by sentencepiece) |
-| [esaxx](https://github.com/hillbig/esaxx) © Daisuke Okanohara | MIT | `licenses/esaxx-LICENSE` | Statically linked (vendored by sentencepiece) |
-| [msgpack-cxx](https://github.com/msgpack/msgpack-c) © msgpack contributors | BSL-1.0 | `licenses/msgpack-LICENSE` | Header-only, compiled in (via tokenizers-cpp) |
+| [esaxx](https://github.com/hillbig/esaxx) © Daisuke Okanohara | MIT | `licenses/esaxx-LICENSE` | Compiled in as the Rust port in the `esaxx-rs` crate (its C++ build is disabled) |
 | [cpp-httplib](https://github.com/yhirose/cpp-httplib) © Yuji Hirose | MIT | `licenses/cpp-httplib-LICENSE` | Header-only, compiled in |
 | [nlohmann/json](https://github.com/nlohmann/json) © Niels Lohmann | MIT | `licenses/nlohmann-json-LICENSE` | Header-only, compiled in |
 

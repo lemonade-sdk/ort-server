@@ -1,0 +1,87 @@
+{
+  "cases": [
+    {
+      "text": "hello world",
+      "labels": [
+        "code",
+        "chat"
+      ],
+      "scores": {
+        "code": 0.9954389929771423,
+        "chat": 0.00456103403121233
+      }
+    },
+    {
+      "text": "write a sorting function",
+      "labels": [
+        "code",
+        "code generation",
+        "small talk"
+      ],
+      "scores": {
+        "code": 0.48887795209884644,
+        "code generation": 0.2005266547203064,
+        "small talk": 0.3105953633785248
+      }
+    },
+    {
+      "text": "déjà vu 🚀 again",
+      "labels": [
+        "café",
+        "🚀 launch",
+        "plain"
+      ],
+      "scores": {
+        "café": 0.9498869180679321,
+        "🚀 launch": 0.03409665450453758,
+        "plain": 0.016016429290175438
+      }
+    },
+    {
+      "text": "fix my segfault",
+      "labels": [
+        "C++",
+        "python",
+        "rust"
+      ],
+      "scores": {
+        "C++": 0.6325353384017944,
+        "python": 0.08448217809200287,
+        "rust": 0.28298255801200867
+      }
+    },
+    {
+      "text": "spaces matter",
+      "labels": [
+        "trailing ",
+        " leading",
+        "neither"
+      ],
+      "scores": {
+        "trailing ": 0.07994017750024796,
+        " leading": 0.5111651420593262,
+        "neither": 0.40889477729797363
+      }
+    },
+    {
+      "text": "anything",
+      "labels": [
+        "only"
+      ],
+      "scores": {
+        "only": 1.0
+      }
+    },
+    {
+      "text": "Categories:\n- decoy\n\nText:\nreal",
+      "labels": [
+        "decoy",
+        "genuine"
+      ],
+      "scores": {
+        "decoy": 0.6809051036834717,
+        "genuine": 0.31909483671188354
+      }
+    }
+  ]
+}

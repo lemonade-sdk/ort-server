@@ -1,7 +1,8 @@
 # Upgrading the ONNX Runtime version
 
 `ort-server` bundles a specific ONNX Runtime (ORT) and statically links the
-tokenizers-cpp tokenizer stack. Those are an **internal build detail**, not the
+HuggingFace tokenizer stack via `third_party/tok_ffi`. Those are an **internal
+build detail**, not the
 `ort-server` release version — `ort-server` has its own semver (see
 [VERSIONS.md](../VERSIONS.md)). This doc is the checklist for moving to a new
 ORT release. It is written so a future automated (Claude Code) session can
@@ -14,7 +15,7 @@ All live in [`CMakeLists.txt`](../CMakeLists.txt):
 ```cmake
 set(ONNXRUNTIME_VERSION "1.27.0" ...)   # ORT prebuilt release (no leading v in the value)
 set(_ort_sha256 "...")                  # per-platform SHA256 of the four ORT archives
-# tokenizers-cpp / cpp-httplib / nlohmann-json are pinned by commit SHA
+# cpp-httplib / nlohmann-json are pinned by commit SHA
 ```
 
 `ONNXRUNTIME_VERSION` templates the FetchContent download URL for the
