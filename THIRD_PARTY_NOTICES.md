@@ -15,6 +15,15 @@ at build time).
 | [esaxx](https://github.com/hillbig/esaxx) © Daisuke Okanohara | MIT | `licenses/esaxx-LICENSE` | Statically linked (vendored by the `esaxx-rs` crate) |
 | [cpp-httplib](https://github.com/yhirose/cpp-httplib) © Yuji Hirose | MIT | `licenses/cpp-httplib-LICENSE` | Header-only, compiled in |
 | [nlohmann/json](https://github.com/nlohmann/json) © Niels Lohmann | MIT | `licenses/nlohmann-json-LICENSE` | Header-only, compiled in |
+| Rust crates reached through `third_party/tok_ffi` (80 in `Cargo.lock`, including the tokenizer crates named above) | MIT / Apache-2.0 / Unicode-3.0 | `licenses/rust-crates-NOTICES.html` | Statically linked; **generated** per release from `Cargo.lock` |
+
+The last row is a count rather than a list because it is generated at release
+time from `Cargo.lock`: `licenses/rust-crates-NOTICES.html` in the archive is
+the authoritative list of those crates and carries their full license texts. The
+release job will not package an archive without it, and fails outright if a
+dependency arrives under a license this project has not accepted. The accepted
+set lives in `third_party/tok_ffi/about.toml` and `deny.toml`.
 
 Exact dependency versions are pinned in `CMakeLists.txt` (SHA256 / commit
-SHAs) and recorded in `VERSIONS.md`.
+SHAs) and recorded in `VERSIONS.md`; the Rust side is pinned in
+`third_party/tok_ffi/Cargo.lock` and built `--locked`.

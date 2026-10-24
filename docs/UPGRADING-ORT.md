@@ -56,6 +56,19 @@ archive contents.
    the exported ONNX graphs still produce identical label scores. If an opset
    is too old for the new ORT, re-export that model.
 
+   **If the tokenizer moved** - a `tokenizers` crate bump in
+   `third_party/tok_ffi/Cargo.toml`, a change to `tok_encode`, or a new
+   tokenizer family in the catalog - also run the tokenizer harness, which
+   compares ids *and* character offsets against HuggingFace case by case:
+   ```
+   python test/parity_tokenizer.py test/fixtures/tiny-router
+   python test/parity_tokenizer.py <catalog-model-dir> --cases <corpus.txt>
+   ```
+   It needs `transformers` and cargo, so it is a manual gate rather than a
+   release-job step. Offsets are the part to watch: ids alone still match when
+   the offsets regress from characters to bytes, and the zero-shot router
+   decides label membership from offsets alone.
+
 6. **If — and only if — a target version is a hard blocker**, step down one ORT
    minor at a time until green, and record the blocker in the release notes.
    Prefer the latest ORT.

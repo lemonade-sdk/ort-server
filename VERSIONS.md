@@ -7,7 +7,7 @@ not encoded in the `ort-server` version. See
 
 | ort-server | ONNX Runtime | Tokenizer |
 |------------|--------------|-----------|
-| unreleased | 1.27.0       | `third_party/tok_ffi` → HF `tokenizers` 0.22 |
+| 0.4.0      | 1.27.0       | `third_party/tok_ffi` → HF `tokenizers` 0.22 |
 | 0.3.7      | 1.27.0       | tokenizers-cpp c586c52 (pinned) |
 | 0.3.6      | 1.27.0       | tokenizers-cpp c586c52 (pinned) |
 | 0.3.5      | 1.27.0       | tokenizers-cpp c586c52 (pinned) |
@@ -16,6 +16,12 @@ not encoded in the `ort-server` version. See
 | 0.3.1-0.3.2 | 1.27.0      | tokenizers-cpp c586c52 (pinned) — **do not use: padded tokenizers served wrong scores** |
 | 0.3.0      | 1.27.0       | tokenizers-cpp main (unpinned) |
 | 0.2.x      | 1.27.0       | tokenizers-cpp main (unpinned) |
+
+## 0.4.0
+
+- **`/classify` contract change.** `labels` is now required for a
+  `zero-shot-classification` model and rejected for any other. Both mismatches
+  answer `400`
 
 Tokenization loads the model's own `tokenizer.json` at runtime through
 `third_party/tok_ffi`, a C ABI this repo owns over the

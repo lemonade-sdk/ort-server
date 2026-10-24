@@ -22,12 +22,16 @@ pub struct TokHandle {
 ///
 /// Ownership passes to the caller, which must hand each one back via
 /// `tok_encoding_free` exactly once -- the same contract as malloc/free.
+///
+/// The fields are `pub` because this struct IS the C ABI: `tok_ffi.h` declares
+/// every one of them, so hiding them in Rust hides nothing from a caller. It
+/// also lets `examples/dump.rs` read a result without a second accessor API.
 #[repr(C)]
 pub struct TokEncoding {
-    ids: *mut u32,
-    starts: *mut u32,
-    ends: *mut u32,
-    len: usize,
+    pub ids: *mut u32,
+    pub starts: *mut u32,
+    pub ends: *mut u32,
+    pub len: usize,
 }
 
 /// Load a tokenizer.json. Returns null on any failure, including a panic.

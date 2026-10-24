@@ -7,6 +7,7 @@ on:
     # Tag == the ort-server version (no `v` prefix), matching the lemond backend
     # version pin, so the release download URL resolves. `v*` kept for back-compat.
     tags: ["[0-9]*", "v*"]
+  pull_request:
   workflow_dispatch:
     inputs:
       version:
@@ -14,7 +15,11 @@ on:
         required: true
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:
@@ -51,7 +56,13 @@ jobs:
         shell: bash
         run: |
           V="${{ github.event.inputs.version }}"
+          if [ -z "$V" ] && [ "${{ github.event_name }}" = "pull_request" ]; then
+            V="0.0.0-pr${{ github.event.number }}"
+          fi
           [ -z "$V" ] && V="${GITHUB_REF_NAME#v}"
+          case "$V" in
+            */*) echo "FAIL: version '$V' contains a slash"; exit 1 ;;
+          esac
           echo "version=$V" >> "$GITHUB_OUTPUT"
 
       # Use the runner's default CMake (Windows ships 4.x for VS 2026 support).
@@ -64,6 +75,38 @@ jobs:
 
       - name: Build
         run: cmake --build build --config Release --parallel
+
+      - name: Test tok_ffi
+        shell: bash
+        run: cargo test --release --locked --manifest-path third_party/tok_ffi/Cargo.toml --target-dir build/tok_ffi
+
+      # Prebuilt binaries: `cargo install` would compile both tools from source
+      # on all four runners, which costs more than the build it guards.
+      - name: Install license tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about,cargo-deny
+
+      # Fail the build on a license this project has not accepted, BEFORE the
+      # archive exists. A dependency bump that pulls in copyleft stops here.
+      - name: Check crate licenses
+        shell: bash
+        run: cargo deny --manifest-path third_party/tok_ffi/Cargo.toml check licenses
+
+      # 80 crates in Cargo.lock are reached through tok_ffi. MIT and Apache-2.0
+      # both require the notice to ship with a binary distribution, and that
+      # list changes on every bump, so generate it rather than maintain it.
+      - name: Generate crate license notices
+        shell: bash
+        run: |
+          cargo about generate \
+            --manifest-path third_party/tok_ffi/Cargo.toml \
+            third_party/tok_ffi/about.hbs > rust-crates-NOTICES.html
+          # An empty or near-empty file means the template or the target list
+          # stopped matching. That must fail here, not ship.
+          [ -s rust-crates-NOTICES.html ] || { echo "FAIL: notices file is empty"; exit 1; }
+          grep -q "license-text" rust-crates-NOTICES.html || {
+            echo "FAIL: notices file holds no license texts"; exit 1; }
 
       - name: Stage
         shell: bash
@@ -87,6 +130,8 @@ jobs:
           # ORT texts come from the exact version-pinned upstream package.
           cp build/_deps/onnxruntime-src/LICENSE stage/licenses/onnxruntime-LICENSE
           cp build/_deps/onnxruntime-src/ThirdPartyNotices.txt stage/licenses/onnxruntime-ThirdPartyNotices.txt
+          # The generated Rust crate list (see "Generate crate license notices").
+          cp rust-crates-NOTICES.html stage/licenses/
 
       - name: Package
         shell: bash
@@ -115,7 +160,8 @@ jobs:
           fi
           [ -f smoke/LICENSE ] || { echo "FAIL: LICENSE missing from archive"; exit 1; }
           [ -f smoke/THIRD_PARTY_NOTICES.md ] || { echo "FAIL: THIRD_PARTY_NOTICES.md missing"; exit 1; }
-          for lf in onnxruntime-LICENSE onnxruntime-ThirdPartyNotices.txt $(ls third_party_licenses); do
+          for lf in onnxruntime-LICENSE onnxruntime-ThirdPartyNotices.txt \
+                    rust-crates-NOTICES.html $(ls third_party_licenses); do
             [ -f "smoke/licenses/$lf" ] || { echo "FAIL: licenses/$lf missing from archive"; exit 1; }
           done
           # Full contract suite: normalization, config.json inference, token
@@ -136,7 +182,9 @@ jobs:
           fi
           python3 test/check_deps.py "$BIN"
 
+      # A pull request build proves the code; it does not produce a download.
       - uses: actions/upload-artifact@v4
+        if: github.event_name != 'pull_request'
         with:
           name: ort-server-${{ matrix.platform }}
           path: ort-server-*.*
@@ -145,6 +193,9 @@ jobs:
     needs: build
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
+    # The only job that publishes, and so the only one that needs write.
+    permissions:
+      contents: write
     steps:
       - uses: actions/download-artifact@v4
         with: { path: dist, merge-multiple: true }

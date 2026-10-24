@@ -122,6 +122,15 @@ if(WIN32)
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
       "${ORT_ROOT}/lib/onnxruntime.dll" "$<TARGET_FILE_DIR:ort-server>")
 else()
+  # Same story as the WIN32 branch: libtok_ffi.a carries the Rust standard
+  # library's code but not the platform libraries it calls. These resolve by
+  # accident on glibc >= 2.34, where libpthread and libdl folded into libc, and
+  # fail to link on older glibc (CentOS 7, Ubuntu 18.04) or on musl. Regenerate
+  # the list with:
+  #   cargo rustc --release --manifest-path third_party/tok_ffi/Cargo.toml -- \
+  #     --print native-static-libs
+  find_package(Threads REQUIRED)
+  target_link_libraries(ort-server PRIVATE Threads::Threads ${CMAKE_DL_LIBS} m)
   file(GLOB _ort_libs "${ORT_ROOT}/lib/libonnxruntime.*")
   target_link_libraries(ort-server PRIVATE ${_ort_libs})
 endif()

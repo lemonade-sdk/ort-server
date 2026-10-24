@@ -42,7 +42,9 @@ reconstructed by this server to match the HuggingFace pipeline. That reconstruct
 is verified against HF-computed reference scores on every release
 (`test/fixtures/*/golden.json`), but it is only *valid* for the single-sequence
 encoder families in the allowlist below — it is not a general guarantee for "any
-HuggingFace classifier".
+HuggingFace classifier". The tokenizer half of that claim has its own harness,
+`test/parity_tokenizer.py`, which compares ids **and character offsets** against
+HuggingFace case by case; run it whenever the tokenizer moves.
 - The output contract (task, labels, normalization, token budget) is inferred
   from the export's own `config.json` + `tokenizer_config.json`. `problem_type`
   is only a training-time hint, so manifest-less inference **assumes
@@ -87,19 +89,23 @@ POST /classify
 
 Such a model reads the labels as part of its input text and needs two extra
 pooling inputs, built here from the tokenizer's character offsets. It has its
-own architecture allowlist, its own truncation rule, and refuses a request whose
-label list overruns the model's window rather than scoring a label it never
-read. See **[docs/ZERO-SHOT-ROUTER.md](docs/ZERO-SHOT-ROUTER.md)**.
+own architecture allowlist, its own token budget, its own request limits and its
+own truncation rule, all described in
+**[docs/ZERO-SHOT-ROUTER.md](docs/ZERO-SHOT-ROUTER.md)**.
 
 ## HTTP contract
 
 | Method | Path | Body | Response |
 |--------|------|------|----------|
 | GET | `/health` | — | `200` when the model is loaded and ready |
-| POST | `/classify` | `{"text": "...", "top_k": N?, "labels": [...]?}` | `{"labels": {"<label>": <score in [0,1]>, ...}}` — `top_k` omitted or `0` returns all labels |
+| POST | `/classify` | `{"text": "...", "top_k": N?, "labels": [...]?}` | `{"labels": {"<label>": <score in [0,1]>, ...}, "truncated": true?}` — `top_k` omitted or `0` returns all labels |
 
 `labels` is required for a `zero-shot-classification` model and rejected for any
 other; both mismatches are a `400` rather than a silently ignored field.
+
+`truncated` appears only on a `zero-shot-classification` response, and only when
+the text did not fit the token window. It is absent otherwise, never `false`, so
+a caller can test for the field itself.
 
 Future capabilities (same server, new endpoints): `POST /embed`, `POST /rerank`.
 

@@ -32,6 +32,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <iterator>
 #include <map>
 #include <memory>
@@ -52,6 +53,24 @@ struct InvalidInput : std::runtime_error {
 
 constexpr const char* kZeroShot = "zero-shot-classification";
 
+constexpr size_t kDefaultMaxGridCells = 32u << 20;
+
+// Smallest number of tokens a label can occupy in the prompt
+constexpr int kMinTokensPerLabel = 4;
+
+// Tokens held back for the user's text when the label block is budgeted.
+constexpr size_t kMinTextTokens = 8;
+
+// Floor for the vocabulary-derived "characters one token can cover" bound.
+constexpr size_t kMinTokenCharsBound = 32;
+
+// Written in place of the middle of a text that did not fit, so the model can
+// see that something is missing.
+constexpr const char* kElision = "\n...\n";
+
+// Share of the text budget given to the head; the rest goes to the tail.
+constexpr size_t kTextHeadDivisor = 3;
+
 struct Manifest {
     // "text-classification" | "token-classification" | "zero-shot-classification"
     std::string task;
@@ -60,14 +79,52 @@ struct Manifest {
     std::string token_aggregation = "max";        // token-cls only; "max" | "mean"
     int max_length = 512;               // token budget; longer inputs are truncated
 
+    // Zero-shot request limits. 0 means "derive from max_length"
+    int max_labels = 0;
+    int max_label_chars = 0;
+    long long max_grid_cells = 0;
+
     bool zero_shot() const { return task == kZeroShot; }
+};
+
+void apply_zero_shot_limits(Manifest& m) {
+    if (!m.zero_shot()) return;
+    if (m.max_labels <= 0) {
+        m.max_labels = std::max(1, m.max_length / kMinTokensPerLabel);
+    }
+    // One label cannot be longer than the whole window.
+    if (m.max_label_chars <= 0) m.max_label_chars = m.max_length;
+    if (m.max_grid_cells <= 0) {
+        m.max_grid_cells = static_cast<long long>(kDefaultMaxGridCells);
+    }
+}
+
+struct LimitOverrides {
+    int max_labels = 0;
+    int max_label_chars = 0;
+    long long max_grid_cells = 0;
 };
 
 struct Args {
     std::string model_path;
     int port = 0;
     bool verbose = false;
+    LimitOverrides limits;
 };
+
+long long positive_arg(const std::string& flag, const char* raw) {
+    try {
+        size_t used = 0;
+        const std::string s(raw);
+        const long long v = std::stoll(s, &used);
+        if (used != s.size()) throw std::invalid_argument("trailing characters");
+        if (v < 1) throw std::out_of_range("must be >= 1");
+        return v;
+    } catch (const std::exception&) {
+        throw std::runtime_error(flag + " needs a positive integer, got '" +
+                                 std::string(raw) + "'");
+    }
+}
 
 Args parse_args(int argc, char** argv) {
     Args a;
@@ -76,9 +133,20 @@ Args parse_args(int argc, char** argv) {
         if (f == "--model-path" && i + 1 < argc) a.model_path = argv[++i];
         else if (f == "--port" && i + 1 < argc) a.port = std::stoi(argv[++i]);
         else if (f == "--verbose") a.verbose = true;
+        else if (f == "--max-labels" && i + 1 < argc)
+            a.limits.max_labels = static_cast<int>(positive_arg(f, argv[++i]));
+        else if (f == "--max-label-chars" && i + 1 < argc)
+            a.limits.max_label_chars = static_cast<int>(positive_arg(f, argv[++i]));
+        else if (f == "--max-grid-cells" && i + 1 < argc)
+            a.limits.max_grid_cells = positive_arg(f, argv[++i]);
     }
     if (a.model_path.empty() || a.port == 0) {
-        throw std::runtime_error("usage: ort-server --model-path <dir> --port <n> [--verbose]");
+        throw std::runtime_error(
+            "usage: ort-server --model-path <dir> --port <n> [--verbose]\n"
+            "       [--max-labels <n>] [--max-label-chars <n>] [--max-grid-cells <n>]\n"
+            "  The three limits apply to zero-shot-classification models only. Each\n"
+            "  overrides the matching manifest.json field; omit to take the manifest's\n"
+            "  value, or the default derived from the model's token window.");
     }
     return a;
 }
@@ -89,6 +157,33 @@ size_t utf8_len(const std::string& s) {
     size_t n = 0;
     for (unsigned char c : s) if ((c & 0xC0) != 0x80) ++n;
     return n;
+}
+
+// Byte offset of character index `chars`, or s.size() if the string is shorter.
+size_t utf8_byte_at(const std::string& s, size_t chars) {
+    size_t n = 0;
+    for (size_t i = 0; i < s.size(); ++i) {
+        if ((static_cast<unsigned char>(s[i]) & 0xC0) != 0x80) {
+            if (n == chars) return i;
+            ++n;
+        }
+    }
+    return s.size();
+}
+
+std::string utf8_range(const std::string& s, size_t from, size_t to) {
+    if (to <= from) return {};
+    const size_t b = utf8_byte_at(s, from);
+    const size_t e = utf8_byte_at(s, to);
+    return s.substr(b, e - b);
+}
+
+std::string utf8_head_tail(const std::string& s, size_t max_chars) {
+    const size_t total = utf8_len(s);
+    if (total <= max_chars) return s;
+    const size_t head = max_chars / 2;
+    const size_t tail = max_chars - head;
+    return utf8_range(s, 0, head) + utf8_range(s, total - tail, total);
 }
 
 void parse_id2label(const json& id2label, Manifest& m, const std::string& origin) {
@@ -130,17 +225,14 @@ json read_json_if_present(const fs::path& p) {
     }
 }
 
-// TWO allowlists, selected by task
-// The classifier tasks feed the model a single sequence with a fabricated
-// all-ones attention mask and all-zero token_type_ids, and truncate by keeping
-// the trailing token. That is exactly right for BERT-family single-sequence
-// encoders and wrong for architectures with different segment/special-token
-// conventions (XLNet puts its classifier token last with a distinct segment id).
-//
-// The zero-shot task shares none of those conventions: it has no segment ids,
-// supplies explicit pooling grids, and truncates with a plain cut. Adding lfm2
-// to the encoder list would silently promise it the encoder treatment, so the
-// lists stay separate
+// TWO allowlists, selected by task. The classifier tasks feed the model a
+// single sequence with a fabricated all-ones attention mask and all-zero
+// token_type_ids, and truncate by keeping the trailing token. That is exactly
+// right for BERT-family single-sequence encoders and wrong for architectures
+// with different segment/special-token conventions (XLNet puts its classifier
+// token last with a distinct segment id). The zero-shot task shares none of
+// them, so listing its architectures here would silently promise them the
+// encoder treatment. See docs/ZERO-SHOT-ROUTER.md.
 const std::set<std::string>& supported_model_types(const std::string& task) {
     static const std::set<std::string> kEncoder = {
         "albert", "bert",     "camembert",  "deberta", "deberta-v2",
@@ -291,6 +383,22 @@ Manifest manifest_from_json(const fs::path& dir, const json& tokenizer_json) {
                                   read_json_if_present(dir / "config.json"), m);
     }
 
+    for (const char* field : {"max_labels", "max_label_chars", "max_grid_cells"}) {
+        if (!j.contains(field) || j[field].is_null()) continue;
+        if (!m.zero_shot()) {
+            throw std::runtime_error(std::string(field) + " only applies to " +
+                                     kZeroShot + "; remove it from manifest.json");
+        }
+        if (!j[field].is_number_integer()) {
+            throw std::runtime_error(std::string(field) + " must be an integer");
+        }
+        const long long v = j[field].get<long long>();
+        if (v < 1) throw std::runtime_error(std::string(field) + " must be >= 1");
+        if (std::string(field) == "max_labels") m.max_labels = static_cast<int>(v);
+        else if (std::string(field) == "max_label_chars") m.max_label_chars = static_cast<int>(v);
+        else m.max_grid_cells = v;
+    }
+
     if (m.zero_shot()) {
         if (j.contains("id2label") && !j["id2label"].is_null()) {
             throw std::runtime_error(
@@ -382,9 +490,26 @@ Manifest manifest_from_hf_config(const fs::path& dir, const json& tokenizer_json
 
 // manifest.json (explicit contract, validated strictly) wins; a bare Optimum
 // export runs via config.json inference so users need no lemonade tooling.
-Manifest load_manifest(const fs::path& dir, const json& tokenizer_json) {
-    if (fs::exists(dir / "manifest.json")) return manifest_from_json(dir, tokenizer_json);
-    return manifest_from_hf_config(dir, tokenizer_json);
+Manifest load_manifest(const fs::path& dir, const json& tokenizer_json,
+                       const LimitOverrides& cli) {
+    Manifest m = fs::exists(dir / "manifest.json")
+                     ? manifest_from_json(dir, tokenizer_json)
+                     : manifest_from_hf_config(dir, tokenizer_json);
+
+    // Command line beats manifest beats derived default.
+    const bool any_cli = cli.max_labels > 0 || cli.max_label_chars > 0 ||
+                         cli.max_grid_cells > 0;
+    if (any_cli && !m.zero_shot()) {
+        throw std::runtime_error(
+            "--max-labels / --max-label-chars / --max-grid-cells apply to " +
+            std::string(kZeroShot) + " models only; this model's task is " + m.task);
+    }
+    if (cli.max_labels > 0) m.max_labels = cli.max_labels;
+    if (cli.max_label_chars > 0) m.max_label_chars = cli.max_label_chars;
+    if (cli.max_grid_cells > 0) m.max_grid_cells = cli.max_grid_cells;
+
+    apply_zero_shot_limits(m);
+    return m;
 }
 
 std::vector<float> softmax(const float* v, size_t n) {
@@ -509,9 +634,8 @@ struct Encoded {
 
 class Model {
 public:
-    Model(const fs::path& dir, bool verbose)
-        : env_(ORT_LOGGING_LEVEL_WARNING, "ort-server") {
-        (void)verbose;
+    Model(const fs::path& dir, bool verbose, const LimitOverrides& cli = {})
+        : env_(ORT_LOGGING_LEVEL_WARNING, "ort-server"), verbose_(verbose) {
         std::string blob = load_bytes(dir / "tokenizer.json");
 
         // Parse BEFORE handing the blob to the Rust tokenizer so a truncated or
@@ -527,9 +651,9 @@ public:
                                      "download?): " + e.what());
         }
 
-        manifest_ = load_manifest(dir, tj);
+        manifest_ = load_manifest(dir, tj, cli);
 
-        tokenizer_ = tok_new(reinterpret_cast<const uint8_t*>(blob.data()), blob.size());
+        tokenizer_.reset(tok_new(reinterpret_cast<const uint8_t*>(blob.data()), blob.size()));
         if (!tokenizer_) throw std::runtime_error("failed to load tokenizer.json from " + dir.string());
 
         // Positions the tokenizer INSERTS ([CLS]/[SEP] from the post-processor
@@ -562,6 +686,35 @@ public:
             special_ids_.insert(pad_id_);
         }
 
+        if (manifest_.zero_shot()) {
+            size_t longest = 0;
+            if (tj.contains("model") && tj["model"].is_object() &&
+                tj["model"].contains("vocab")) {
+                const json& v = tj["model"]["vocab"];
+                if (v.is_object()) {  // BPE / WordPiece / WordLevel: {token: id}
+                    for (auto it = v.begin(); it != v.end(); ++it) {
+                        longest = std::max(longest, utf8_len(it.key()));
+                    }
+                } else if (v.is_array()) {  // Unigram: [[token, score], ...]
+                    for (const auto& e : v) {
+                        if (e.is_array() && !e.empty() && e[0].is_string()) {
+                            longest = std::max(longest, utf8_len(e[0].get<std::string>()));
+                        }
+                    }
+                }
+            }
+            max_token_chars_ = std::max(longest, kMinTokenCharsBound);
+
+            Encoded empty = encode("", /*add_special_tokens=*/true);
+            size_t k = empty.size();
+            if (pad_id_ >= 0) {
+                while (k > 0 && empty.ids[k - 1] == pad_id_) --k;
+            }
+            n_specials_ = k;
+
+            elision_tokens_ = encode(kElision, /*add_special_tokens=*/false).size();
+        }
+
         Ort::SessionOptions opts;
         opts.SetIntraOpNumThreads(0);
         session_ = Ort::Session(env_, (dir / "model.onnx").c_str(), opts);
@@ -577,9 +730,6 @@ public:
         bind_inputs();
     }
 
-    ~Model() {
-        if (tokenizer_) tok_free(tokenizer_);
-    }
     Model(const Model&) = delete;
     Model& operator=(const Model&) = delete;
 
@@ -634,16 +784,16 @@ private:
     // One tokenization of `text`, with the character span of every token.
     // The mutex covers the tokenizer handle; tokenization is microseconds next
     // to the session run, which stays concurrent.
-    Encoded encode(const std::string& text) const {
+    // Special tokens default ON: encoder classifiers pool [CLS]/use [SEP], the
+    // catalog's parity validation runs the HF tokenizer with them enabled, and
+    // the router's reference route() leaves the default on too - serving
+    // without them would silently diverge.
+    Encoded encode(const std::string& text, bool add_special_tokens = true) const {
         TokEncoding enc{};
         {
             std::lock_guard<std::mutex> lock(tokenizer_mutex_);
-            // Special tokens ON: encoder classifiers pool [CLS]/use [SEP], the
-            // catalog's parity validation runs the HF tokenizer with them
-            // enabled, and the router's reference route() leaves the default on
-            // too — serving without them would silently diverge.
-            if (!tok_encode(tokenizer_, reinterpret_cast<const uint8_t*>(text.data()),
-                            text.size(), /*add_special_tokens=*/true, &enc)) {
+            if (!tok_encode(tokenizer_.get(), reinterpret_cast<const uint8_t*>(text.data()),
+                            text.size(), add_special_tokens, &enc)) {
                 throw std::runtime_error("tokenization failed");
             }
         }
@@ -680,7 +830,8 @@ private:
         return v.GetTensorData<float>();
     }
 
-    static json rank(std::vector<std::pair<std::string, float>> ranked, int top_k) {
+    static json rank(std::vector<std::pair<std::string, float>> ranked, int top_k,
+                     bool truncated = false) {
         // stable_sort so equal scores keep the caller's label order, matching
         // the reference's stable sorted(..., reverse=True).
         std::stable_sort(ranked.begin(), ranked.end(),
@@ -688,7 +839,9 @@ private:
         if (top_k > 0 && static_cast<size_t>(top_k) < ranked.size()) ranked.resize(top_k);
         json labels = json::object();
         for (auto& [label, score] : ranked) labels[label] = score;
-        return json{{"labels", labels}};
+        json out{{"labels", labels}};
+        if (truncated) out["truncated"] = true;
+        return out;
     }
 
     json classify(const std::string& text, int top_k) {
@@ -785,10 +938,34 @@ private:
     // come from the tokenizer rather than being reconstructed.
     json route(const std::string& text, const std::vector<std::string>& labels, int top_k) {
         if (labels.empty()) throw InvalidInput("\"labels\" must contain at least one label");
+        if (labels.size() > static_cast<size_t>(manifest_.max_labels)) {
+            // A ceiling on the impossible, not a recommended size: a label
+            // costs at least kMinTokensPerLabel tokens, so no more than this
+            // many can EVER fit.
+            throw InvalidInput("too many labels: " + std::to_string(labels.size()) +
+                               " (limit " + std::to_string(manifest_.max_labels) +
+                               "). A label costs at least " +
+                               std::to_string(kMinTokensPerLabel) + " tokens, so this "
+                               "model's " + std::to_string(manifest_.max_length) +
+                               "-token window cannot hold more, however short they are.");
+        }
         std::set<std::string> seen;
         for (const auto& l : labels) {
             if (l.find_first_not_of(" \t\r\n") == std::string::npos) {
                 throw InvalidInput("labels must not be empty or whitespace-only");
+            }
+            if (utf8_len(l) > static_cast<size_t>(manifest_.max_label_chars)) {
+                throw InvalidInput("label is too long: " + std::to_string(utf8_len(l)) +
+                                   " characters (limit " + std::to_string(manifest_.max_label_chars) +
+                                   "; raise it with \"max_label_chars\" in manifest.json "
+                                   "or --max-label-chars)");
+            }
+            for (unsigned char c : l) {
+                if (c < 0x20 || c == 0x7F) {
+                    throw InvalidInput(
+                        "labels must not contain control characters such as newline "
+                        "or tab: '" + l + "'");
+                }
             }
             if (!seen.insert(l).second) {
                 // Identical labels would collide as keys in the response object,
@@ -797,35 +974,108 @@ private:
             }
         }
 
-        // Build the template and record where each label sits, IN CHARACTERS.
-        //   Categories:\n- <l0>\n- <l1>\n\nText:\n<text>
-        std::string prompt = "Categories:\n";
+        const size_t max_len = static_cast<size_t>(manifest_.max_length);
+
+        // Build the LABEL BLOCK on its own and record where each label sits, IN
+        // CHARACTERS. The text is appended only after the block has been
+        // measured and the text has been given what the block left.
+        //   Categories:\n- <l0>\n- <l1>\n\nText:\n
+        std::string block = "Categories:\n";
         std::vector<std::pair<size_t, size_t>> ranges;
         ranges.reserve(labels.size());
         size_t pos = utf8_len("Categories:\n");
         for (size_t i = 0; i < labels.size(); ++i) {
-            if (i) prompt += "\n";
-            prompt += "- " + labels[i];
+            if (i) block += "\n";
+            block += "- " + labels[i];
             const size_t start = pos + 2;          // skip "- "
             const size_t end = start + utf8_len(labels[i]);
             ranges.emplace_back(start, end);
             pos = end + 1;                         // the "\n" that follows
         }
-        prompt += "\n\nText:\n";
-        const size_t text_start = utf8_len(prompt);
-        prompt += text;
+        block += "\n\nText:\n";
+        const size_t text_start = utf8_len(block);
 
-        Encoded enc = encode(prompt);
-        // A plain cut: unlike the encoder path there is no trailing marker to
-        // preserve, and the tokenizer's own truncation works the same way.
-        const size_t max_len = static_cast<size_t>(manifest_.max_length);
+        // Guard, by characters: refuse a block the window provably cannot hold
+        // WITHOUT tokenizing it, so an absurd label set costs one division.
+        if (text_start / max_token_chars_ > max_len) {
+            throw InvalidInput(
+                "the label list is far larger than this model's " +
+                std::to_string(max_len) + "-token window (" +
+                std::to_string(text_start) + " characters of labels). "
+                "Send fewer or shorter labels.");
+        }
+
+        // Labels are mandatory: every one must be scored, so
+        // a block that does not fit is refused, never cut.
+        const size_t label_tokens = encode(block, /*add_special_tokens=*/false).size();
+        // kMinTextTokens is a floor on a window big enough to have one.
+        const size_t min_text = std::max<size_t>(1, std::min(kMinTextTokens, max_len / 8));
+        const size_t reserve = n_specials_ + min_text;
+        if (label_tokens + reserve > max_len) {
+            throw InvalidInput(
+                "the label list needs " + std::to_string(label_tokens) +
+                " tokens, and this model's window holds " + std::to_string(max_len) +
+                " with " + std::to_string(reserve) +
+                " reserved for markers and text. Send fewer or shorter labels.");
+        }
+
+        const size_t text_budget = max_len - n_specials_ - label_tokens;
+        bool truncated = false;
+        std::string body = text;
+
+        const size_t char_guard = text_budget * max_token_chars_;
+        if (utf8_len(body) > char_guard) {
+            body = utf8_head_tail(body, char_guard);
+            truncated = true;
+        }
+
+        Encoded t = encode(body, /*add_special_tokens=*/false);
+        if (t.size() > text_budget) {
+            // Pay for the marker out of the budget, but only if the budget can
+            // afford it and still keep both ends.
+            size_t keep = text_budget;
+            std::string mid;
+            if (text_budget > elision_tokens_ + 1) {
+                keep = text_budget - elision_tokens_;
+                mid = kElision;
+            }
+            const size_t head = std::max<size_t>(1, keep / kTextHeadDivisor);
+            const size_t tail = keep - head;
+            body = utf8_range(body, 0, t.ends[head - 1]) + mid +
+                   (tail > 0 ? utf8_range(body, t.starts[t.size() - tail], utf8_len(body))
+                             : std::string());
+            truncated = true;
+        }
+
+        Encoded enc = encode(block + body);
+        // Backstop only: tokens(A + B) can differ by one or two from
+        // tokens(A) + tokens(B) at the seam. The window check above left the
+        // labels room to spare, so this cut can only land inside the text.
         if (enc.size() > max_len) {
             enc.ids.resize(max_len);
             enc.starts.resize(max_len);
             enc.ends.resize(max_len);
+            truncated = true;
         }
         const size_t n = enc.size();
         if (n == 0) throw std::runtime_error("empty tokenization");
+
+        if (truncated && verbose_) {
+            std::cerr << "[ort-server] text truncated: " << labels.size()
+                      << " labels cost " << label_tokens << " tokens of a "
+                      << max_len << "-token window, leaving " << text_budget
+                      << " for a text that needed " << t.size() << "\n";
+        }
+
+        const long long cells = static_cast<long long>(labels.size()) * static_cast<long long>(n);
+        if (cells > manifest_.max_grid_cells) {
+            throw InvalidInput(
+                "label set too large for this model: " + std::to_string(labels.size()) +
+                " labels x " + std::to_string(n) + " tokens = " + std::to_string(cells) +
+                " pooling-grid cells (limit " + std::to_string(manifest_.max_grid_cells) +
+                "; use fewer labels, or raise \"max_grid_cells\" in "
+                "manifest.json or --max-grid-cells)");
+        }
 
         Bindings b;
         b.input_ids = std::move(enc.ids);
@@ -835,41 +1085,49 @@ private:
 
         // A token belongs to label r if its span overlaps label r's character
         // range, and to the user's text if its span ends past where the text
-        // starts. Zero-width tokens are excluded either way — that is what drops
-        // the inserted start-of-text marker, which reports the span (0, 0).
-        b.category_pool.assign(labels.size() * n, 0.0f);
-        for (size_t r = 0; r < labels.size(); ++r) {
-            const auto [start, end] = ranges[r];
-            std::vector<size_t> idxs;
+        // starts. The two tests are independent: a token straddling the
+        // "\n\nText:\n" header counts for both, exactly as the reference does.
+        // Zero-width tokens are excluded either way — that is what drops the
+        // inserted start-of-text marker, which reports the span (0, 0).
+
+        auto scan = [&](auto&& on_label, auto&& on_text) {
+            size_t r0 = 0;
+            uint32_t prev_start = 0;
             for (size_t i = 0; i < n; ++i) {
-                if (enc.starts[i] < end && enc.ends[i] > start &&
-                    enc.starts[i] != enc.ends[i]) {
-                    idxs.push_back(i);
+                if (enc.starts[i] == enc.ends[i]) continue;
+                if (enc.starts[i] < prev_start) r0 = 0;
+                prev_start = enc.starts[i];
+                while (r0 < ranges.size() && ranges[r0].second <= enc.starts[i]) ++r0;
+                for (size_t r = r0; r < ranges.size() && ranges[r].first < enc.ends[i]; ++r) {
+                    if (enc.starts[i] < ranges[r].second) on_label(r, i);
                 }
+                if (enc.ends[i] > text_start) on_text(i);
             }
-            if (idxs.empty()) {
-                throw InvalidInput(
-                    "label '" + labels[r] + "' got no tokens: the label list overran "
-                    "the model's " + std::to_string(max_len) +
-                    "-token window (try fewer or shorter labels)");
+        };
+
+        std::vector<size_t> counts(labels.size(), 0);
+        size_t text_count = 0;
+        scan([&](size_t r, size_t) { ++counts[r]; }, [&](size_t) { ++text_count; });
+
+        for (size_t r = 0; r < labels.size(); ++r) {
+            if (counts[r] == 0) {
+                throw std::runtime_error(
+                    "internal: label '" + labels[r] + "' got no tokens although the "
+                    "label block was budgeted to fit the window");
             }
-            const float w = 1.0f / static_cast<float>(idxs.size());
-            for (size_t i : idxs) b.category_pool[r * n + i] = w;
+        }
+        if (text_count == 0) {
+            throw InvalidInput(
+                "no text tokens: \"text\" holds nothing this tokenizer keeps");
         }
 
+        b.category_pool.assign(labels.size() * n, 0.0f);
         b.text_pool.assign(n, 0.0f);
-        std::vector<size_t> text_idxs;
-        for (size_t i = 0; i < n; ++i) {
-            if (enc.ends[i] > text_start && enc.starts[i] != enc.ends[i]) {
-                text_idxs.push_back(i);
-            }
-        }
-        if (text_idxs.empty()) {
-            throw InvalidInput(
-                "no text tokens: \"text\" is empty, or the label list left no room "
-                "for it in the model's " + std::to_string(max_len) + "-token window");
-        }
-        for (size_t i : text_idxs) b.text_pool[i] = 1.0f / static_cast<float>(text_idxs.size());
+        const float text_w = 1.0f / static_cast<float>(text_count);
+        scan([&](size_t r, size_t i) {
+                 b.category_pool[r * n + i] = 1.0f / static_cast<float>(counts[r]);
+             },
+             [&](size_t i) { b.text_pool[i] = text_w; });
 
         auto outputs = run(b);
         std::vector<int64_t> out_shape;
@@ -886,15 +1144,19 @@ private:
         std::vector<std::pair<std::string, float>> ranked;
         ranked.reserve(labels.size());
         for (size_t r = 0; r < labels.size(); ++r) ranked.emplace_back(labels[r], p[r]);
-        return rank(std::move(ranked), top_k);
+        return rank(std::move(ranked), top_k, truncated);
     }
 
     Ort::Env env_;
     Ort::Session session_{nullptr};
     Ort::AllocatorWithDefaultOptions alloc_;
-    TokHandle* tokenizer_ = nullptr;
+    std::unique_ptr<TokHandle, decltype(&tok_free)> tokenizer_{nullptr, tok_free};
+    bool verbose_ = false;
     int64_t pad_id_ = -1;  // >= 0 when tokenizer.json enables padding
     std::set<int64_t> special_ids_;
+    size_t max_token_chars_ = kMinTokenCharsBound;
+    size_t n_specials_ = 0;
+    size_t elision_tokens_ = 0;
     mutable std::mutex tokenizer_mutex_;
     std::vector<std::string> input_names_;
     std::vector<std::string> output_names_;
@@ -907,7 +1169,7 @@ private:
 int main(int argc, char** argv) {
     try {
         Args args = parse_args(argc, argv);
-        Model model(args.model_path, args.verbose);
+        Model model(args.model_path, args.verbose, args.limits);
 
         httplib::Server srv;
         srv.Get("/health", [](const httplib::Request&, httplib::Response& res) {

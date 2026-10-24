@@ -1,0 +1,38 @@
+# cargo-deny: the gate that stops a crate bump from quietly changing what
+# ort-server is allowed to ship.
+#
+#   cargo deny --manifest-path third_party/tok_ffi/Cargo.toml check licenses
+#
+# The release job runs this before it builds the archive. A dependency bump
+# that pulls in a copyleft license then fails the build instead of shipping.
+
+[licenses]
+version = 2
+confidence-threshold = 0.9
+
+# The same set as about.toml's `accepted`, for the same reason: what we write
+# into the notices and what we permit must not drift apart.
+#
+# Every crate in the current tree offers one of these. Several carry a
+# disjunction such as "MIT OR Apache-2.0 OR LGPL-2.1-or-later" (r-efi, a UEFI
+# target crate reached through getrandom): the disjunction is satisfied by MIT,
+# so the LGPL arm is never the one in force. cargo-deny resolves this the same
+# way, which is why the arm does not need an exception.
+allow = [
+    "Apache-2.0",
+    "MIT",
+    "BSD-2-Clause",
+    "BSL-1.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+
+# A shrinking dependency tree must not fail the build: an entry above that no
+# crate uses any more is a stale list, not a licensing problem.
+unused-allowed-license = "allow"
+
+[licenses.private]
+# tok_ffi itself is `publish = false` and has no license field. It is this
+# repository's own code, covered by the top-level LICENSE.
+ignore = true

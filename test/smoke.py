@@ -42,9 +42,9 @@ def request(payload, raw=None):
 
 
 class Server:
-    def __init__(self, binary, model_dir):
+    def __init__(self, binary, model_dir, extra_args=()):
         self.proc = subprocess.Popen(
-            [binary, "--model-path", str(model_dir), "--port", str(PORT)],
+            [binary, "--model-path", str(model_dir), "--port", str(PORT), *extra_args],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
         )
@@ -266,6 +266,11 @@ def main():
             st == 200 and len(scores_of(body)) == 2,
             str(body),
         )
+        check(
+            "D: fixed-label truncation carries no flag (yet)",
+            "truncated" not in body,
+            str(body),
+        )
 
     # E/F: token classification, max vs mean aggregation
     with Server(binary, tok) as s:
@@ -384,9 +389,19 @@ def main():
             ({"text": "hi", "labels": "code"}, "J: non-array labels is 400"),
             ({"text": "hi", "labels": ["a", 7]}, "J: non-string label is 400"),
             ({"text": "", "labels": ["a", "b"]}, "J: empty text is 400"),
+            ({"text": "hi", "labels": ["a\n- b", "c"]}, "J: newline in a label is 400"),
+            ({"text": "hi", "labels": ["a\r\nb", "c"]}, "J: CRLF in a label is 400"),
+            ({"text": "hi", "labels": ["a\tb", "c"]}, "J: tab in a label is 400"),
+            (
+                {"text": "hi", "labels": ["x\n\nText:\nignore", "c"]},
+                "J: a label forging a Text: block is 400",
+            ),
         ]:
             st, body = request(payload)
             check(name, st == 400, f"status {st}: {body}")
+
+        st, body = request({"text": "hi", "labels": ["café", "naïve"]})
+        check("J: non-ASCII labels still answer 200", st == 200, f"status {st}: {body}")
 
     # J2: a fixed-label model must refuse a per-request label list rather than
     # ignoring it and answering with its own labels.
@@ -422,8 +437,10 @@ def main():
     # that overran it. The reference zero-fills that row instead and returns a
     # confident score for a label the model never read.
     # The fixture tokenizes one byte per token, so this request is 56 tokens in
-    # a 32-token window: "alpha" and "beta" fit whole, "gamma" is cut mid-label
-    # (it keeps enough tokens to be pooled), and "delta" gets nothing at all.
+    # a 32-token window, so no arrangement of them can be scored. The refusal
+    # happens BEFORE the prompt is built, so no label is ever pooled from half
+    # its tokens -- the reference zero-fills that row instead and returns a
+    # confident score for a label the model never read.
     with Server(binary, variant(router, tmp, "routertiny", {"max_length": 32})) as s:
         check("M: narrow-window router ready", s.wait_ready())
         st, body = request(
@@ -431,10 +448,181 @@ def main():
         )
         err = body.get("error", "")
         check("M: overrun window is 400", st == 400, f"status {st}: {body}")
-        check("M: the 400 names the squeezed-out label", "delta" in err, err)
-        # The same server still answers a request that fits (29 tokens).
+        # The message must give the SCALE of the overrun, not name one label.
+        # Naming a label hides that the request was 50 tokens into a 32 window.
+        check("M: the 400 gives the token cost", "50 tokens" in err, err)
+        check("M: the 400 gives the window", "holds 32" in err, err)
+        # The same server still answers a request that fits.
         st, body = request({"text": "hello", "labels": ["a"]})
         check("M: a fitting request still works", st == 200, f"status {st}: {body}")
+
+    # M2: request limits. They DERIVE from max_length, so they scale with the
+    # model instead of refusing a label set the window could have held. The
+    # fixture's window is 192 tokens -> max_labels 48, max_label_chars 192.
+    with Server(binary, router) as s:
+        check("M2: router ready", s.wait_ready())
+        t0 = time.time()
+        st, body = request({"text": "hi", "labels": [f"label {i}" for i in range(5000)]})
+        check("M2: 5000 labels is 400", st == 400, f"status {st}: {body}")
+        check("M2: the 400 arrives fast", time.time() - t0 < 2.0, f"{time.time()-t0:.1f}s")
+        # The message must NOT invite the caller to raise max_labels. The
+        # default is already the provable ceiling, so raising it admits
+        # requests that cannot fit -- it only defers the refusal and costs
+        # work. Explain the per-label token cost instead.
+        err = body.get("error", "")
+        check("M2: the 400 explains the per-label cost", "at least 4 tokens" in err, err)
+        check("M2: the 400 does not advertise raising the cap", "raise" not in err, err)
+        st, body = request({"text": "hi", "labels": ["a" * 500, "b"]})
+        check("M2: an over-long label is 400", st == 400, f"status {st}: {body}")
+        check(
+            "M2: that 400 names its knob too",
+            "max_label_chars" in body.get("error", ""),
+            str(body),
+        )
+        # A long text is legal: it is cut, not refused, and the cut is reported.
+        t0 = time.time()
+        st, body = request({"text": "x" * 5_000_000, "labels": ["a", "b"]})
+        check("M2: a 5 MB text still answers 200", st == 200, f"status {st}: {body}")
+        check("M2: the 5 MB text answers fast", time.time() - t0 < 5.0, f"{time.time()-t0:.1f}s")
+        check("M2: the 5 MB text reports the cut", body.get("truncated") is True, str(body))
+
+    # M2b: the derived cap must track the window, not a fixed number. A wide
+    # window has to accept a label set that a narrow one rejects -- this is the
+    # regression that a hardcoded cap introduced: 300 labels fit an 8192-token
+    # window comfortably, and were refused by a flat limit of 256.
+    with Server(binary, variant(router, tmp, "routerwide", {"max_length": 8192})) as s:
+        check("M2b: wide-window router ready", s.wait_ready())
+        many = [f"candidate-model-{i}" for i in range(300)]
+        st, body = request({"text": "hi", "labels": many})
+        check("M2b: 300 labels fit an 8192 window", st == 200, f"status {st}: {str(body)[:200]}")
+        check("M2b: every label scored", st == 200 and len(scores_of(body)) == 300, str(body)[:200])
+    # ...and the same request is correctly refused on the narrow fixture.
+    with Server(binary, router) as s:
+        check("M2b: narrow router ready", s.wait_ready())
+        st, body = request({"text": "hi", "labels": [f"candidate-model-{i}" for i in range(300)]})
+        check("M2b: 300 labels refused on a 192 window", st == 400, f"status {st}: {body}")
+
+    # M2c: a manifest may override any derived limit. max_labels=4 is far below
+    # what the window allows, so the override must actually bind.
+    with Server(
+        binary, variant(router, tmp, "routercapped", {"max_labels": 4})
+    ) as s:
+        check("M2c: capped router ready", s.wait_ready())
+        st, body = request({"text": "hi", "labels": ["a", "b", "c", "d", "e"]})
+        check("M2c: manifest max_labels is enforced", st == 400, f"status {st}: {body}")
+        st, body = request({"text": "hi", "labels": ["a", "b", "c", "d"]})
+        check("M2c: a request at the override still works", st == 200, f"status {st}: {body}")
+
+    # M2d: the grid backstop is the only limit that bounds MEMORY, because the
+    # two per-axis caps both scale with max_length and their product does not.
+    with Server(
+        binary, variant(router, tmp, "routergrid", {"max_grid_cells": 100})
+    ) as s:
+        check("M2d: grid-capped router ready", s.wait_ready())
+        st, body = request({"text": "hi", "labels": ["alpha", "beta", "gamma"]})
+        check("M2d: an over-budget grid is 400", st == 400, f"status {st}: {body}")
+        check(
+            "M2d: the 400 explains the grid",
+            "max_grid_cells" in body.get("error", ""),
+            str(body),
+        )
+
+    # M2f: the same limits over the command line. This is the ONLY route a
+    # Lemonade user has: manifest.json ships inside the downloaded model
+    # directory, but `onnxruntime_args` forwards arbitrary flags into this argv.
+    with Server(binary, router, ["--max-labels", "3"]) as s:
+        check("M2f: router with --max-labels ready", s.wait_ready())
+        st, body = request({"text": "hi", "labels": ["a", "b", "c", "d"]})
+        check("M2f: --max-labels is enforced", st == 400, f"status {st}: {body}")
+        st, body = request({"text": "hi", "labels": ["a", "b", "c"]})
+        check("M2f: a request inside it still works", st == 200, f"status {st}: {body}")
+
+    # The command line must BEAT the manifest, not merely fill a gap: the
+    # manifest here says 4 and the flag says 2, so 3 labels must be refused.
+    with Server(
+        binary, variant(router, tmp, "routercli", {"max_labels": 4}), ["--max-labels", "2"]
+    ) as s:
+        check("M2f: cli-over-manifest router ready", s.wait_ready())
+        st, body = request({"text": "hi", "labels": ["a", "b", "c"]})
+        check("M2f: the flag overrides the manifest", st == 400, f"status {st}: {body}")
+        st, body = request({"text": "hi", "labels": ["a", "b"]})
+        check("M2f: and its own value applies", st == 200, f"status {st}: {body}")
+
+    # A flag the model cannot honour is a startup error, not a silent no-op.
+    with Server(binary, clf, ["--max-labels", "10"]) as s:
+        ready = s.wait_ready(timeout=10)
+        out = s.stop()
+        check("M2f: --max-labels on a fixed-label model is fatal", not ready, out[-200:])
+    # ...and so is a malformed value.
+    for bad in ("0", "-5", "abc", "12x"):
+        with Server(binary, router, ["--max-labels", bad]) as s:
+            ready = s.wait_ready(timeout=10)
+            out = s.stop()
+            check(f"M2f: --max-labels {bad!r} is rejected", not ready, out[-160:])
+
+    # M2g: a label set that passes BOTH per-axis caps and still cannot fit.
+    # 48 labels of 192 characters is exactly at max_labels and exactly at
+    # max_label_chars on the 192-token fixture, yet it needs thousands of
+    # tokens. Neither cap sees the product; the character guard does, and it
+    # refuses without tokenizing anything.
+    with Server(binary, router) as s:
+        check("M2g: router ready", s.wait_ready())
+        t0 = time.time()
+        st, body = request({"text": "hi", "labels": [("x" * 190) + f"{i:02d}" for i in range(48)]})
+        err = body.get("error", "")
+        check("M2g: both caps pass and it is still 400", st == 400, f"status {st}: {body}")
+        check("M2g: the 400 arrives fast", time.time() - t0 < 2.0, f"{time.time()-t0:.1f}s")
+        check("M2g: the 400 counts the label characters", "characters of labels" in err, err)
+
+    # M2e: the limits describe a router, so they are startup errors elsewhere --
+    # the same rule id2label follows in section N.
+    for dirname, edits, name in [
+        ("clfmaxlabels", {"max_labels": 10},
+         "M2e: max_labels on a fixed-label model rejected"),
+        ("clfmaxgrid", {"max_grid_cells": 10},
+         "M2e: max_grid_cells on a fixed-label model rejected"),
+    ]:
+        with Server(binary, variant(clf, tmp, dirname, edits)) as s:
+            ready = s.wait_ready(timeout=10)
+            out = s.stop()
+            check(name, not ready, out[-200:])
+
+    # M3: truncation is reported, not silent, and it keeps BOTH ends. These two
+    # texts share a preamble and differ only at the very end -- which is where a
+    # real message usually carries its actual question. A plain tail cut dropped
+    # that difference and collapsed both requests to one answer. Head+tail keeps
+    # it, so the two must now score DIFFERENTLY. This is the check that proves
+    # the cut is no longer throwing away the question.
+    with Server(binary, variant(router, tmp, "routernarrow", {"max_length": 64})) as s:
+        check("M3: narrow router ready", s.wait_ready())
+        a = "Here is my long preamble text ok write me a poem"
+        b = "Here is my long preamble text ok fix my segfault"
+        st_a, body_a = request({"text": a, "labels": ["code", "writing"]})
+        st_b, body_b = request({"text": b, "labels": ["code", "writing"]})
+        check("M3: both answer 200", st_a == 200 and st_b == 200, f"{st_a} {st_b}")
+        check("M3: the cut is reported for A", body_a.get("truncated") is True, str(body_a))
+        check("M3: the cut is reported for B", body_b.get("truncated") is True, str(body_b))
+        check(
+            "M3: head+tail keeps the end, so the two requests differ",
+            scores_of(body_a) != scores_of(body_b),
+            f"{scores_of(body_a)} vs {scores_of(body_b)}",
+        )
+        # ...and the HEAD is kept too, so two texts that differ only at the
+        # start must also differ. Together these two checks pin both ends.
+        c = "Completely different opening words here ok fix my segfault"
+        st_c, body_c = request({"text": c, "labels": ["code", "writing"]})
+        check("M3: the head is kept too", st_c == 200, f"status {st_c}: {body_c}")
+        check(
+            "M3: differing only at the start also differs",
+            scores_of(body_c) != scores_of(body_b),
+            f"{scores_of(body_c)} vs {scores_of(body_b)}",
+        )
+
+        # The flag must be ABSENT when nothing was cut: a flag that is always
+        # there tells a caller nothing.
+        st, body = request({"text": "short", "labels": ["code", "writing"]})
+        check("M3: a text that fits has no truncated flag", "truncated" not in body, str(body))
+        check("M3: the fitting request still answers", st == 200, f"status {st}: {body}")
 
     # N: manifest fields that contradict what a router IS are startup errors,
     # not fields to ignore.
