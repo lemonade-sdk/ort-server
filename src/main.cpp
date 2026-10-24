@@ -34,6 +34,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <limits>
 #include <map>
 #include <memory>
 #include <set>
@@ -112,16 +113,18 @@ struct Args {
     LimitOverrides limits;
 };
 
-long long positive_arg(const std::string& flag, const char* raw) {
+long long positive_arg(const std::string& flag, const char* raw,
+                       long long hi = std::numeric_limits<long long>::max()) {
     try {
         size_t used = 0;
         const std::string s(raw);
         const long long v = std::stoll(s, &used);
         if (used != s.size()) throw std::invalid_argument("trailing characters");
-        if (v < 1) throw std::out_of_range("must be >= 1");
+        if (v < 1 || v > hi) throw std::out_of_range("out of range");
         return v;
     } catch (const std::exception&) {
-        throw std::runtime_error(flag + " needs a positive integer, got '" +
+        throw std::runtime_error(flag + " needs an integer between 1 and " +
+                                 std::to_string(hi) + ", got '" +
                                  std::string(raw) + "'");
     }
 }
@@ -134,9 +137,11 @@ Args parse_args(int argc, char** argv) {
         else if (f == "--port" && i + 1 < argc) a.port = std::stoi(argv[++i]);
         else if (f == "--verbose") a.verbose = true;
         else if (f == "--max-labels" && i + 1 < argc)
-            a.limits.max_labels = static_cast<int>(positive_arg(f, argv[++i]));
+            a.limits.max_labels = static_cast<int>(
+                positive_arg(f, argv[++i], std::numeric_limits<int>::max()));
         else if (f == "--max-label-chars" && i + 1 < argc)
-            a.limits.max_label_chars = static_cast<int>(positive_arg(f, argv[++i]));
+            a.limits.max_label_chars = static_cast<int>(
+                positive_arg(f, argv[++i], std::numeric_limits<int>::max()));
         else if (f == "--max-grid-cells" && i + 1 < argc)
             a.limits.max_grid_cells = positive_arg(f, argv[++i]);
     }
@@ -372,8 +377,13 @@ Manifest manifest_from_json(const fs::path& dir, const json& tokenizer_json) {
         if (!j["max_length"].is_number_integer()) {
             throw std::runtime_error("max_length must be an integer");
         }
-        m.max_length = j["max_length"].get<int>();
-        if (m.max_length < 2) throw std::runtime_error("max_length must be >= 2");
+        const long long v = j["max_length"].get<long long>();
+        if (v < 2 || v > std::numeric_limits<int>::max()) {
+            throw std::runtime_error(
+                "max_length must be between 2 and " +
+                std::to_string(std::numeric_limits<int>::max()));
+        }
+        m.max_length = static_cast<int>(v);
     } else if (m.zero_shot()) {
         apply_zero_shot_max_length(tokenizer_json, dir, m);
     } else {
@@ -393,7 +403,14 @@ Manifest manifest_from_json(const fs::path& dir, const json& tokenizer_json) {
             throw std::runtime_error(std::string(field) + " must be an integer");
         }
         const long long v = j[field].get<long long>();
-        if (v < 1) throw std::runtime_error(std::string(field) + " must be >= 1");
+        const bool narrows = std::string(field) != "max_grid_cells";
+        const long long hi = narrows
+                                 ? static_cast<long long>(std::numeric_limits<int>::max())
+                                 : std::numeric_limits<long long>::max();
+        if (v < 1 || v > hi) {
+            throw std::runtime_error(std::string(field) + " must be between 1 and " +
+                                     std::to_string(hi));
+        }
         if (std::string(field) == "max_labels") m.max_labels = static_cast<int>(v);
         else if (std::string(field) == "max_label_chars") m.max_label_chars = static_cast<int>(v);
         else m.max_grid_cells = v;

@@ -87,11 +87,18 @@ set(TOK_FFI_LIB
 
 add_custom_command(
   OUTPUT "${TOK_FFI_LIB}"
-  COMMAND "${CARGO_EXECUTABLE}" build --release
+  # --locked: build the versions Cargo.lock pins, and fail if the lock file is
+  # stale, rather than silently resolving something else. The release job
+  # already builds this way; so must a local build, or they are not the same
+  # binary.
+  COMMAND "${CARGO_EXECUTABLE}" build --release --locked
           --manifest-path "${TOK_FFI_DIR}/Cargo.toml"
           --target-dir "${TOK_FFI_TARGET_DIR}"
+  # Cargo.lock belongs here: `cargo update` rewrites it without touching
+  # Cargo.toml, and without this line the stale static library looks current.
   DEPENDS "${TOK_FFI_DIR}/src/lib.rs"
           "${TOK_FFI_DIR}/Cargo.toml"
+          "${TOK_FFI_DIR}/Cargo.lock"
           "${TOK_FFI_DIR}/tok_ffi.h"
   COMMENT "Building tokenizer FFI (Rust)"
   VERBATIM)

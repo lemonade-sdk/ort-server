@@ -554,11 +554,28 @@ def main():
         out = s.stop()
         check("M2f: --max-labels on a fixed-label model is fatal", not ready, out[-200:])
     # ...and so is a malformed value.
-    for bad in ("0", "-5", "abc", "12x"):
+    for bad in ("0", "-5", "abc", "12x", "4294967297", "3000000000"):
         with Server(binary, router, ["--max-labels", bad]) as s:
             ready = s.wait_ready(timeout=10)
             out = s.stop()
             check(f"M2f: --max-labels {bad!r} is rejected", not ready, out[-160:])
+    # The same wrap reached through the manifest, which has its own cast.
+    for field in ("max_labels", "max_label_chars"):
+        with Server(
+            binary, variant(router, tmp, f"routerwrap{field}", {field: 4294967297})
+        ) as s:
+            ready = s.wait_ready(timeout=10)
+            out = s.stop()
+            check(f"M2f: manifest {field} past INT_MAX is rejected", not ready, out[-200:])
+    with Server(binary, variant(router, tmp, "routerwraplen", {"max_length": 4294967298})) as s:
+        ready = s.wait_ready(timeout=10)
+        out = s.stop()
+        check("M2f: manifest max_length past INT_MAX is rejected", not ready, out[-200:])
+    # max_grid_cells is a long long, so a value this size is legitimate.
+    with Server(
+        binary, variant(router, tmp, "routerbiggrid", {"max_grid_cells": 4294967297})
+    ) as s:
+        check("M2f: max_grid_cells past INT_MAX still starts", s.wait_ready())
 
     # M2g: a label set that passes BOTH per-axis caps and still cannot fit.
     # 48 labels of 192 characters is exactly at max_labels and exactly at
