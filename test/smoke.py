@@ -641,6 +641,50 @@ def main():
         check("M3: a text that fits has no truncated flag", "truncated" not in body, str(body))
         check("M3: the fitting request still answers", st == 200, f"status {st}: {body}")
 
+    # M4: truncation must cut on CHARACTER boundaries, not token boundaries.
+    # One character can be several tokens that all report the same character
+    # span -- in this fixture one emoji is 4 tokens spanning (c, c+1), and the
+    # production tokenizer splits it into 3. Converting a token budget to a
+    # character position therefore rounds OUTWARD, keeping every token of the
+    # character the budget landed inside. The prompt then overruns the window
+    # and the final guard used to trim raw token ids, leaving a fraction of a
+    # character at the end of the text.
+    #
+    # The window is chosen so the old code overran by 3 tokens and the trim
+    # kept 1 of a 4-token emoji.
+    #
+    # The check: the truncated prompt must be reproducible by some REAL text.
+    # A prompt built from whole characters is head + elision + tail, so some
+    # small (k, m) must score identically while itself fitting untruncated.
+    # A prompt ending in a fragment of a character cannot be reproduced by any
+    # input, so no (k, m) matches and this fails.
+    with Server(binary, variant(router, tmp, "routeremoji", {"max_length": 45})) as s:
+        check("M4: emoji router ready", s.wait_ready())
+        rocket = "\U0001F680"
+        st, body = request({"text": rocket * 100, "labels": ["alpha", "beta"]})
+        check("M4: a long emoji text answers 200", st == 200, f"status {st}: {body}")
+        check("M4: and reports the cut", body.get("truncated") is True, str(body))
+        match = None
+        for k in range(6):
+            for m in range(6):
+                probe = rocket * k + "\n...\n" + rocket * m
+                stp, bp = request({"text": probe, "labels": ["alpha", "beta"]})
+                if (
+                    stp == 200
+                    and "truncated" not in bp
+                    and scores_of(bp) == scores_of(body)
+                ):
+                    match = (k, m)
+                    break
+            if match:
+                break
+        check(
+            "M4: the cut lands on a character boundary",
+            match is not None,
+            f"no whole-character text reproduces {scores_of(body)}; "
+            "the prompt ends inside a character",
+        )
+
     # N: manifest fields that contradict what a router IS are startup errors,
     # not fields to ignore.
     for edits, name in [

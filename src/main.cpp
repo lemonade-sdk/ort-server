@@ -649,6 +649,19 @@ struct Encoded {
     size_t size() const { return ids.size(); }
 };
 
+size_t head_chars_for(const Encoded& t, size_t budget) {
+    size_t h = std::min(budget, t.size());
+    while (h > 0 && h < t.size() && t.ends[h - 1] == t.ends[h]) --h;
+    return h > 0 ? static_cast<size_t>(t.ends[h - 1]) : 0;
+}
+
+size_t tail_chars_for(const Encoded& t, size_t budget, size_t total_chars) {
+    if (budget == 0 || t.size() == 0) return total_chars;
+    size_t i = t.size() - std::min(budget, t.size());
+    while (i < t.size() && i > 0 && t.starts[i] == t.starts[i - 1]) ++i;
+    return i < t.size() ? static_cast<size_t>(t.starts[i]) : total_chars;
+}
+
 class Model {
 public:
     Model(const fs::path& dir, bool verbose, const LimitOverrides& cli = {})
@@ -1058,16 +1071,31 @@ private:
             }
             const size_t head = std::max<size_t>(1, keep / kTextHeadDivisor);
             const size_t tail = keep - head;
-            body = utf8_range(body, 0, t.ends[head - 1]) + mid +
-                   (tail > 0 ? utf8_range(body, t.starts[t.size() - tail], utf8_len(body))
-                             : std::string());
+            const size_t total = utf8_len(body);
+            const size_t head_end = head_chars_for(t, head);
+            size_t tail_start = tail_chars_for(t, tail, total);
+            if (tail_start < head_end) tail_start = head_end;
+            body = utf8_range(body, 0, head_end) + mid +
+                   utf8_range(body, tail_start, total);
             truncated = true;
         }
 
         Encoded enc = encode(block + body);
-        // Backstop only: tokens(A + B) can differ by one or two from
-        // tokens(A) + tokens(B) at the seam. The window check above left the
-        // labels room to spare, so this cut can only land inside the text.
+        // tokens(A + B) can differ from tokens(A) + tokens(B) by a token or
+        // two where the two strings meet. Shorten the TEXT and tokenize again
+        // rather than trimming ids: a raw id cut can land inside a character,
+        // which is exactly what the offsets above exist to prevent. The label
+        // block is never touched -- the window check proved it fits, and it
+        // sits ahead of the text.
+        for (int guard = 0;
+             enc.size() > max_len && guard < 8 && !body.empty(); ++guard) {
+            const size_t chars = utf8_len(body);
+            const size_t drop =
+                std::min(chars, std::max<size_t>(1, enc.size() - max_len));
+            body = utf8_range(body, 0, chars - drop);
+            enc = encode(block + body);
+            truncated = true;
+        }
         if (enc.size() > max_len) {
             enc.ids.resize(max_len);
             enc.starts.resize(max_len);
