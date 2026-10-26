@@ -68,7 +68,7 @@ pub unsafe extern "C" fn tok_new(json: *const u8, json_len: usize) -> *mut TokHa
             Ok(mut t) => {
                 // Infallible when clearing: `with_truncation(None)` cannot fail.
                 let _ = t.with_truncation(None);
-                // MUTATION t.with_padding(None);
+                t.with_padding(None);
                 Box::into_raw(Box::new(TokHandle { inner: t }))
             }
             Err(_) => ptr::null_mut(),
