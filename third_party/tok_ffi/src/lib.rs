@@ -49,6 +49,12 @@ pub struct TokEncoding {
 /// identical ids and offsets. Verified on plain, router-shaped and
 /// unicode-heavy inputs, and pinned by `truncation_is_left_to_the_caller`.
 ///
+/// Any `padding` block is disabled too, matching `transformers`' default of
+/// `padding=False`. ort-server serves one sequence at a time, so pad ids only
+/// inflate every token count the server budgets with and reach the model under
+/// an all-ones attention mask. The encoder path strips trailing pads downstream;
+/// the zero-shot path does not, so a padded tokenizer.json scored wrongly there.
+///
 /// # Safety
 /// `json` must point to `json_len` readable bytes.
 #[no_mangle]
@@ -62,6 +68,7 @@ pub unsafe extern "C" fn tok_new(json: *const u8, json_len: usize) -> *mut TokHa
             Ok(mut t) => {
                 // Infallible when clearing: `with_truncation(None)` cannot fail.
                 let _ = t.with_truncation(None);
+                // MUTATION t.with_padding(None);
                 Box::into_raw(Box::new(TokHandle { inner: t }))
             }
             Err(_) => ptr::null_mut(),
@@ -186,10 +193,7 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/tests/data/tokenizer.json"
         ));
-        let Ok(json) = json else {
-            eprintln!("skipped: no tests/data/tokenizer.json fixture");
-            return;
-        };
+        let json = json.expect("tests/data/tokenizer.json is missing");
         let h = unsafe { tok_new(json.as_ptr(), json.len()) };
         assert!(!h.is_null());
 
@@ -211,21 +215,15 @@ mod tests {
         }
     }
 
-    /// tok_new must clear tokenizer.json's own truncation, leaving ort-server
-    /// the single owner of the token budget. The fixture declares
-    /// `max_length: 192`; if the crate were still applying it, a manifest
-    /// asking for a larger window would be silently capped here and the
-    /// resulting error would name a budget that was never applied.
+    /// tok_new clears tokenizer.json's truncation (see `tok_new`). The fixture
+    /// declares `max_length: 192`, so a longer result proves it is cleared.
     #[test]
     fn truncation_is_left_to_the_caller() {
         let json = std::fs::read(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/tests/data/tokenizer.json"
         ));
-        let Ok(json) = json else {
-            eprintln!("skipped: no tests/data/tokenizer.json fixture");
-            return;
-        };
+        let json = json.expect("tests/data/tokenizer.json is missing");
         let h = unsafe { tok_new(json.as_ptr(), json.len()) };
         assert!(!h.is_null());
 
@@ -241,6 +239,51 @@ mod tests {
             enc.len > 192,
             "tokenizer.json truncation still applied: got {} tokens",
             enc.len
+        );
+
+        unsafe {
+            tok_encoding_free(&mut enc);
+            tok_free(h);
+        }
+    }
+
+    /// tok_new clears tokenizer.json's padding (see `tok_new`). The fixture's
+    /// padding is null, so the test swaps in a `Fixed(64)` block.
+    #[test]
+    fn padding_is_left_to_the_caller() {
+        let json = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/data/tokenizer.json"
+        ))
+        .expect("tests/data/tokenizer.json is missing");
+
+        let padded = json.replacen(
+            "\"padding\": null",
+            concat!(
+                "\"padding\":{\"strategy\":{\"Fixed\":64},\"direction\":\"Right\",",
+                "\"pad_to_multiple_of\":null,\"pad_id\":0,\"pad_type_id\":0,",
+                "\"pad_token\":\"<|startoftext|>\"}"
+            ),
+            1,
+        );
+        assert_ne!(padded, json, "the fixture no longer has \"padding\": null");
+
+        let h = unsafe { tok_new(padded.as_ptr(), padded.len()) };
+        assert!(!h.is_null(), "the padding block did not parse");
+
+        let text = "hello";
+        let mut enc = TokEncoding {
+            ids: ptr::null_mut(),
+            starts: ptr::null_mut(),
+            ends: ptr::null_mut(),
+            len: 0,
+        };
+        assert!(unsafe { tok_encode(h, text.as_ptr(), text.len(), true, &mut enc) });
+        assert!(
+            enc.len < 64,
+            "tokenizer.json padding still applied: got {} tokens for {:?}",
+            enc.len,
+            text
         );
 
         unsafe {

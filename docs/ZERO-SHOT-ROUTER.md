@@ -219,6 +219,18 @@ end, such as code pasted above *"why does this crash?"*. The text gets one third
 of its budget from the head and two thirds from the tail, with `\n...\n` between
 them so the model can see that something is missing.
 
+The model reads the marker, but `text_pool` leaves it out: the marker is the
+server's text, not the user's. The rule goes by position, so the same five
+characters typed by the user are pooled as usual.
+
+**The cut lands between characters.** One character can be several tokens, as
+an emoji often is. A character the budget cannot afford whole is dropped whole.
+When not one character fits on either side of the marker, the marker is dropped
+and the tail takes the whole budget.
+
+With a cut, the prompt no longer matches the reference implementation, which
+has no budget and never cuts. Parity holds for input that fits.
+
 Run with `--verbose` to see each cut on stderr:
 
 ```

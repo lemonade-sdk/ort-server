@@ -107,6 +107,16 @@ def scores_of(body):
     return labels if isinstance(labels, dict) else {}
 
 
+def scores_close(a, b, tol=1e-5):
+    """Same labels, and every score within `tol`. For comparisons whose two
+    sides sum the same vectors in a different order, so bitwise equality is
+    too strict."""
+    sa, sb = scores_of(a), scores_of(b)
+    return bool(sa) and sa.keys() == sb.keys() and all(
+        abs(sa[k] - sb[k]) <= tol for k in sa
+    )
+
+
 GOLDEN_TOL = 1e-4
 
 
@@ -267,9 +277,15 @@ def main():
             str(body),
         )
         check(
-            "D: fixed-label truncation carries no flag (yet)",
-            "truncated" not in body,
+            "D: fixed-label truncation is reported",
+            body.get("truncated") is True,
             str(body),
+        )
+        st, body = request({"text": "hi"})
+        check(
+            "D: a fitting fixed-label request carries no flag",
+            st == 200 and "truncated" not in body,
+            f"status {st}: {body}",
         )
 
     # E/F: token classification, max vs mean aggregation
@@ -641,48 +657,82 @@ def main():
         check("M3: a text that fits has no truncated flag", "truncated" not in body, str(body))
         check("M3: the fitting request still answers", st == 200, f"status {st}: {body}")
 
-    # M4: truncation must cut on CHARACTER boundaries, not token boundaries.
-    # One character can be several tokens that all report the same character
-    # span -- in this fixture one emoji is 4 tokens spanning (c, c+1), and the
-    # production tokenizer splits it into 3. Converting a token budget to a
-    # character position therefore rounds OUTWARD, keeping every token of the
-    # character the budget landed inside. The prompt then overruns the window
-    # and the final guard used to trim raw token ids, leaving a fraction of a
-    # character at the end of the text.
-    #
-    # The window is chosen so the old code overran by 3 tokens and the trim
-    # kept 1 of a 4-token emoji.
-    #
-    # The check: the truncated prompt must be reproducible by some REAL text.
-    # A prompt built from whole characters is head + elision + tail, so some
-    # small (k, m) must score identically while itself fitting untruncated.
-    # A prompt ending in a fragment of a character cannot be reproduced by any
-    # input, so no (k, m) matches and this fails.
+    # M4: the cut lands between characters. Window 45 is where a token-level
+    # cut kept 1 of a 4-token emoji. The fixture graph averages the pooled
+    # embeddings with no position, so any number of whole rockets scores the
+    # same as one rocket, and a fragment would shift the average.
     with Server(binary, variant(router, tmp, "routeremoji", {"max_length": 45})) as s:
         check("M4: emoji router ready", s.wait_ready())
         rocket = "\U0001F680"
         st, body = request({"text": rocket * 100, "labels": ["alpha", "beta"]})
         check("M4: a long emoji text answers 200", st == 200, f"status {st}: {body}")
         check("M4: and reports the cut", body.get("truncated") is True, str(body))
-        match = None
-        for k in range(6):
-            for m in range(6):
-                probe = rocket * k + "\n...\n" + rocket * m
-                stp, bp = request({"text": probe, "labels": ["alpha", "beta"]})
-                if (
-                    stp == 200
-                    and "truncated" not in bp
-                    and scores_of(bp) == scores_of(body)
-                ):
-                    match = (k, m)
-                    break
-            if match:
-                break
+        st1, one = request({"text": rocket, "labels": ["alpha", "beta"]})
         check(
             "M4: the cut lands on a character boundary",
-            match is not None,
-            f"no whole-character text reproduces {scores_of(body)}; "
-            "the prompt ends inside a character",
+            st1 == 200 and scores_close(body, one),
+            f"cut text scores {scores_of(body)}, one whole rocket scores "
+            f"{scores_of(one)}; the prompt ends inside a character, or the "
+            "marker was pooled (see M6)",
+        )
+
+    # M5: a `padding` block in tokenizer.json changes nothing. Uncleared, the
+    # pads would push label_tokens on this fixture from 34 to 64.
+    pad_block = {
+        "strategy": {"Fixed": 64},
+        "direction": "Right",
+        "pad_to_multiple_of": None,
+        "pad_id": 0,
+        "pad_type_id": 0,
+        "pad_token": "<|startoftext|>",
+    }
+    padded = variant(router, tmp, "routerpadded")
+    tj = json.loads((padded / "tokenizer.json").read_text(encoding="utf-8"))
+    tj["padding"] = pad_block
+    (padded / "tokenizer.json").write_text(json.dumps(tj), encoding="utf-8")
+
+    cases = [
+        {"text": "hello", "labels": ["alpha", "beta"]},
+        {"text": "write me a poem about the sea", "labels": ["code", "writing", "math"]},
+        {"text": "x" * 4000, "labels": ["alpha", "beta"]},
+    ]
+    with Server(binary, router) as s:
+        check("M5: unpadded router ready", s.wait_ready())
+        baseline = [request(c) for c in cases]
+    with Server(binary, padded) as s:
+        check("M5: padded router ready", s.wait_ready())
+        for c, (st0, b0) in zip(cases, baseline):
+            st1, b1 = request(c)
+            check(
+                f"M5: padding changes nothing for {c['text'][:18]!r}",
+                st1 == st0 and b1 == b0,
+                f"{st0} {b0}  vs  {st1} {b1}",
+            )
+    # ...and the encoder path keeps its downstream filter as a backstop.
+    with Server(binary, pad) as s:
+        check("M5: padded fixed-label model still ready", s.wait_ready())
+        check_golden(pad, "M5: GOLDEN padded encoder still matches")
+
+    # M6: the server's marker stays out of text_pool, so a cut "a" * 1000 must
+    # score as the text "a" (the same averaging argument as M4). The second
+    # check pins that the rule goes by position: "\n...\n" typed by the user
+    # is still pooled.
+    with Server(binary, variant(router, tmp, "routermarker", {"max_length": 64})) as s:
+        check("M6: marker router ready", s.wait_ready())
+        labels = ["alpha", "beta"]
+        st, cut = request({"text": "a" * 1000, "labels": labels})
+        _, one = request({"text": "a", "labels": labels})
+        _, typed = request({"text": "a\n...\na", "labels": labels})
+        check("M6: the long text is cut", st == 200 and cut.get("truncated") is True, str(cut))
+        check(
+            "M6: the server's marker stays out of text_pool",
+            scores_close(cut, one),
+            f"cut {scores_of(cut)} vs plain 'a' {scores_of(one)}",
+        )
+        check(
+            "M6: the same characters typed by the user are still pooled",
+            "truncated" not in typed and not scores_close(typed, one),
+            f"typed {scores_of(typed)} vs plain 'a' {scores_of(one)}",
         )
 
     # N: manifest fields that contradict what a router IS are startup errors,

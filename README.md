@@ -103,9 +103,11 @@ own truncation rule, all described in
 `labels` is required for a `zero-shot-classification` model and rejected for any
 other; both mismatches are a `400` rather than a silently ignored field.
 
-`truncated` appears only on a `zero-shot-classification` response, and only when
-the text did not fit the token window. It is absent otherwise, never `false`, so
-a caller can test for the field itself.
+`truncated` appears, on any task, only when the text did not fit the token
+window. It is absent otherwise, never `false`, so a caller can test for the
+field itself. What the cut drops depends on the path: the encoder tasks keep the
+head and drop the end, while `zero-shot-classification` keeps the head and the
+tail and drops the middle.
 
 Future capabilities (same server, new endpoints): `POST /embed`, `POST /rerank`.
 

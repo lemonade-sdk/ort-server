@@ -92,39 +92,12 @@ def load_cases(path: Path) -> list[str]:
     return lines
 
 
-def fixed_padding(tokenizer_json: Path) -> int | None:
-    """The fixed width tokenizer.json pads to, or None.
-
-    This matters because tok_new treats the two settings in the file
-    DIFFERENTLY, on purpose:
-
-      * truncation is CLEARED, so that the token budget has exactly one owner,
-        ort-server's max_length;
-      * padding is KEPT, because a padded tokenizer is a real family and
-        ort-server filters the pad tokens downstream (fixture tiny-pad; the
-        0.3.1 regression that served wrong scores).
-
-    A reference that drops both would report every padded tokenizer as a
-    mismatch, which says nothing about the FFI layer.
-    """
-    try:
-        pad = json.loads(tokenizer_json.read_text(encoding="utf-8")).get("padding")
-    except (OSError, ValueError):
-        return None
-    strategy = (pad or {}).get("strategy")
-    if isinstance(strategy, dict) and isinstance(strategy.get("Fixed"), int):
-        return strategy["Fixed"]
-    # "BatchLongest" pads a batch to its longest member, which is a no-op for
-    # the one-sequence-at-a-time encoding both sides do here.
-    return None
-
-
 def reference_encoder(model_dir: Path, add_special: bool):
     """Return (name, fn) where fn(text) -> (ids, starts, ends).
 
     `transformers` first: that is the pipeline this server claims parity with.
+    Truncation and padding are off on both sides, as tok_new sets them.
     """
-    pad_to = fixed_padding(model_dir / "tokenizer.json")
     try:
         from transformers import AutoTokenizer
         from transformers.utils import logging as hf_logging
@@ -137,26 +110,20 @@ def reference_encoder(model_dir: Path, add_special: bool):
         if not tok.is_fast:
             raise RuntimeError("not a fast tokenizer")
 
-        pad_kwargs = (
-            {"padding": "max_length", "max_length": pad_to}
-            if pad_to
-            else {"padding": False}
-        )
-
         def encode(text: str):
             enc = tok(
                 text,
                 add_special_tokens=add_special,
                 truncation=False,
+                padding=False,
                 return_offsets_mapping=True,
-                **pad_kwargs,
             )
             offs = enc["offset_mapping"]
             return (list(enc["input_ids"]),
                     [o[0] for o in offs],
                     [o[1] for o in offs])
 
-        return f"transformers (pad_to={pad_to})", encode
+        return "transformers", encode
     except Exception as e:  # noqa: BLE001 - any failure falls through
         first = e
 
@@ -164,7 +131,8 @@ def reference_encoder(model_dir: Path, add_special: bool):
         from tokenizers import Tokenizer
 
         tok = Tokenizer.from_file(str(model_dir / "tokenizer.json"))
-        tok.no_truncation()  # as tok_new does; padding is left as the file set it
+        tok.no_truncation()  # both, as tok_new does
+        tok.no_padding()
 
         def encode(text: str):
             enc = tok.encode(text, add_special_tokens=add_special)
@@ -172,7 +140,7 @@ def reference_encoder(model_dir: Path, add_special: bool):
                     [o[0] for o in enc.offsets],
                     [o[1] for o in enc.offsets])
 
-        return f"tokenizers (pad_to={pad_to})", encode
+        return "tokenizers", encode
     except Exception as e:  # noqa: BLE001
         raise SystemExit(
             f"no reference tokenizer available.\n"

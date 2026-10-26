@@ -24,8 +24,6 @@
 // to work out which tokens belong to which label.
 #include "tok_ffi.h"
 
-#include <mutex>
-
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -186,7 +184,7 @@ std::string utf8_range(const std::string& s, size_t from, size_t to) {
 std::string utf8_head_tail(const std::string& s, size_t max_chars) {
     const size_t total = utf8_len(s);
     if (total <= max_chars) return s;
-    const size_t head = max_chars / 2;
+    const size_t head = max_chars / kTextHeadDivisor;
     const size_t tail = max_chars - head;
     return utf8_range(s, 0, head) + utf8_range(s, total - tail, total);
 }
@@ -696,19 +694,11 @@ public:
         // are special *tokens* but appear as ordinary content positions (an
         // out-of-vocabulary word becomes [UNK] and HF still scores it), and
         // HF's special_tokens_mask marks them 0.
-        //
-        // The zero-shot path needs none of this: an inserted marker has a
-        // zero-width character span, and zero-width tokens are excluded from
-        // both pooling grids exactly as the reference excludes them.
         if (tj.contains("post_processor")) {
             collect_inserted_special_ids(tj["post_processor"], special_ids_);
         }
 
-        // A tokenizer.json that carries a `padding` section pads every encoding
-        // out to a fixed width — the HuggingFace reference does NOT pad by
-        // default, so those trailing [PAD] ids must be dropped. Feeding them to
-        // the model (under our all-ones attention mask) makes it attend to
-        // padding as if it were text and silently corrupts the scores.
+        // Backstop only: tok_new clears padding (see tok_ffi/src/lib.rs).
         if (tj.contains("padding") && tj["padding"].is_object() &&
             tj["padding"].contains("pad_id") &&
             tj["padding"]["pad_id"].is_number_integer()) {
@@ -812,20 +802,16 @@ private:
     }
 
     // One tokenization of `text`, with the character span of every token.
-    // The mutex covers the tokenizer handle; tokenization is microseconds next
-    // to the session run, which stays concurrent.
     // Special tokens default ON: encoder classifiers pool [CLS]/use [SEP], the
     // catalog's parity validation runs the HF tokenizer with them enabled, and
     // the router's reference route() leaves the default on too - serving
     // without them would silently diverge.
+    // No lock: tokenizers::Tokenizer is Sync and tok_encode borrows it shared.
     Encoded encode(const std::string& text, bool add_special_tokens = true) const {
         TokEncoding enc{};
-        {
-            std::lock_guard<std::mutex> lock(tokenizer_mutex_);
-            if (!tok_encode(tokenizer_.get(), reinterpret_cast<const uint8_t*>(text.data()),
-                            text.size(), add_special_tokens, &enc)) {
-                throw std::runtime_error("tokenization failed");
-            }
+        if (!tok_encode(tokenizer_.get(), reinterpret_cast<const uint8_t*>(text.data()),
+                        text.size(), add_special_tokens, &enc)) {
+            throw std::runtime_error("tokenization failed");
         }
         Encoded out;
         out.ids.assign(enc.ids, enc.ids + enc.len);
@@ -891,10 +877,12 @@ private:
         // Truncate to the manifest's token budget, keeping the trailing token
         // (usually [SEP] / </s>) so the sequence stays well-formed.
         const size_t max_len = static_cast<size_t>(manifest_.max_length);
+        bool truncated = false;
         if (b.input_ids.size() > max_len) {
             int64_t last = b.input_ids.back();
             b.input_ids.resize(max_len - 1);
             b.input_ids.push_back(last);
+            truncated = true;
         }
         b.seq_len = static_cast<int64_t>(b.input_ids.size());
 
@@ -957,15 +945,12 @@ private:
             auto p = normalize(logits, num_labels, manifest_.score_normalization);
             for (size_t l = 0; l < num_labels; ++l) scores[manifest_.id2label[l]] = p[l];
         }
-        return rank({scores.begin(), scores.end()}, top_k);
+        return rank({scores.begin(), scores.end()}, top_k, truncated);
     }
 
     // --- zero-shot ----------------------------------------------------------
-    // The model reads one block of text holding both the label list and the
-    // user's text, and is told via two pooling grids which tokens are which.
-    // This mirrors the reference route() exactly: same template, same character
-    // ranges, same overlap test — the only difference being that the offsets
-    // come from the tokenizer rather than being reconstructed.
+    // Template, token budget, truncation, pooling, and where this departs from
+    // the reference route(): docs/ZERO-SHOT-ROUTER.md.
     json route(const std::string& text, const std::vector<std::string>& labels, int top_k) {
         if (labels.empty()) throw InvalidInput("\"labels\" must contain at least one label");
         if (labels.size() > static_cast<size_t>(manifest_.max_labels)) {
@@ -1052,6 +1037,8 @@ private:
         const size_t text_budget = max_len - n_specials_ - label_tokens;
         bool truncated = false;
         std::string body = text;
+        size_t mark_from = 0;
+        size_t mark_to = 0;
 
         const size_t char_guard = text_budget * max_token_chars_;
         if (utf8_len(body) > char_guard) {
@@ -1075,8 +1062,14 @@ private:
             const size_t head_end = head_chars_for(t, head);
             size_t tail_start = tail_chars_for(t, tail, total);
             if (tail_start < head_end) tail_start = head_end;
+            if (head_end == 0 && tail_start == total) {
+                mid.clear();
+                tail_start = tail_chars_for(t, text_budget, total);
+            }
             body = utf8_range(body, 0, head_end) + mid +
                    utf8_range(body, tail_start, total);
+            mark_from = head_end;
+            mark_to = head_end + utf8_len(mid);
             truncated = true;
         }
 
@@ -1128,13 +1121,12 @@ private:
         b.seq_len = static_cast<int64_t>(n);
         b.num_labels = static_cast<int64_t>(labels.size());
 
-        // A token belongs to label r if its span overlaps label r's character
-        // range, and to the user's text if its span ends past where the text
-        // starts. The two tests are independent: a token straddling the
-        // "\n\nText:\n" header counts for both, exactly as the reference does.
-        // Zero-width tokens are excluded either way — that is what drops the
-        // inserted start-of-text marker, which reports the span (0, 0).
+        const size_t mark0 = text_start + mark_from;
+        const size_t mark1 = text_start + mark_to;
 
+        // The label and text tests are independent, as in the reference: a token
+        // straddling the "\n\nText:\n" header counts for both. The server's own
+        // elision marker is kept out of text_pool by position.
         auto scan = [&](auto&& on_label, auto&& on_text) {
             size_t r0 = 0;
             uint32_t prev_start = 0;
@@ -1146,7 +1138,8 @@ private:
                 for (size_t r = r0; r < ranges.size() && ranges[r].first < enc.ends[i]; ++r) {
                     if (enc.starts[i] < ranges[r].second) on_label(r, i);
                 }
-                if (enc.ends[i] > text_start) on_text(i);
+                const bool in_marker = enc.starts[i] >= mark0 && enc.ends[i] <= mark1;
+                if (enc.ends[i] > text_start && !in_marker) on_text(i);
             }
         };
 
@@ -1156,14 +1149,18 @@ private:
 
         for (size_t r = 0; r < labels.size(); ++r) {
             if (counts[r] == 0) {
-                throw std::runtime_error(
-                    "internal: label '" + labels[r] + "' got no tokens although the "
-                    "label block was budgeted to fit the window");
+                throw InvalidInput(
+                    "label '" + labels[r] + "' holds nothing this tokenizer keeps");
             }
         }
         if (text_count == 0) {
             throw InvalidInput(
-                "no text tokens: \"text\" holds nothing this tokenizer keeps");
+                truncated
+                    ? "the label list leaves " + std::to_string(text_budget) +
+                          " tokens for the text, fewer than one of its characters "
+                          "needs. Send fewer or shorter labels."
+                    : std::string(
+                          "no text tokens: \"text\" holds nothing this tokenizer keeps"));
         }
 
         b.category_pool.assign(labels.size() * n, 0.0f);
@@ -1202,7 +1199,6 @@ private:
     size_t max_token_chars_ = kMinTokenCharsBound;
     size_t n_specials_ = 0;
     size_t elision_tokens_ = 0;
-    mutable std::mutex tokenizer_mutex_;
     std::vector<std::string> input_names_;
     std::vector<std::string> output_names_;
     std::vector<const InputSpec*> bound_;  // parallel to input_names_
