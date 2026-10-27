@@ -9,6 +9,7 @@ guard. Stdlib only, so it runs on any CI runner.
 """
 
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -203,6 +204,17 @@ def main():
     # A: sequence classification, explicit manifest (softmax)
     with Server(binary, clf) as s:
         check("A: server ready (manifest)", s.wait_ready())
+        # lemond reads `version` to decide whether this backend reports
+        # `truncated`, so it must be exactly the CMakeLists.txt VERSION.
+        with urllib.request.urlopen(f"{BASE}/health", timeout=5) as r:
+            health = json.loads(r.read())
+        cmake = (HERE.parent / "CMakeLists.txt").read_text(encoding="utf-8")
+        want = re.search(r"project\(ort-server VERSION ([0-9.]+)", cmake)
+        check(
+            "A: /health reports the project version",
+            want is not None and health.get("version") == want.group(1),
+            f"{health} vs CMakeLists.txt {want.group(1) if want else '(not found)'}",
+        )
         st, body = request({"text": "hello world"})
         a_scores = scores_of(body)
         check("A: 200 with 2 labels", st == 200 and len(a_scores) == 2, str(body))

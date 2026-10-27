@@ -97,7 +97,7 @@ own truncation rule, all described in
 
 | Method | Path | Body | Response |
 |--------|------|------|----------|
-| GET | `/health` | — | `200` when the model is loaded and ready |
+| GET | `/health` | — | `200` when the model is loaded and ready: `{"status": "ok", "version": "<ort-server>", "onnxruntime": "<ORT>"}` |
 | POST | `/classify` | `{"text": "...", "top_k": N?, "labels": [...]?}` | `{"labels": {"<label>": <score in [0,1]>, ...}, "truncated": true?}` — `top_k` omitted or `0` returns all labels |
 
 `labels` is required for a `zero-shot-classification` model and rejected for any
@@ -108,6 +108,10 @@ window. It is absent otherwise, never `false`, so a caller can test for the
 field itself. What the cut drops depends on the path: the encoder tasks keep the
 head and drop the end, while `zero-shot-classification` keeps the head and the
 tail and drops the middle.
+
+Servers before 0.4.0 cut without reporting it, and their `/health` carries no
+`version`. A caller that must not act on a cut input should require `version`
+0.4.0 or later before it trusts an absent `truncated`.
 
 Future capabilities (same server, new endpoints): `POST /embed`, `POST /rerank`.
 

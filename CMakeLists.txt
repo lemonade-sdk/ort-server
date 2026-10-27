@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
-project(ort-server CXX)
+# The release tag must equal VERSION (release.yml checks); /health reports it.
+project(ort-server VERSION 0.4.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -108,6 +109,7 @@ add_custom_target(tok_ffi_build DEPENDS "${TOK_FFI_LIB}")
 add_executable(ort-server src/main.cpp)
 add_dependencies(ort-server tok_ffi_build)
 target_compile_definitions(ort-server PRIVATE
+  ORT_SERVER_VERSION="${PROJECT_VERSION}"
   ORT_SERVER_ONNXRUNTIME_VERSION="${ONNXRUNTIME_VERSION}")
 target_include_directories(ort-server PRIVATE
   "${ORT_ROOT}/include"

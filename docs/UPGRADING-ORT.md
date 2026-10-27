@@ -73,7 +73,8 @@ archive contents.
    minor at a time until green, and record the blocker in the release notes.
    Prefer the latest ORT.
 
-7. **Release.** Bump `ort-server`'s own version, update `VERSIONS.md`, tag it
+7. **Release.** Bump `ort-server`'s own version in `CMakeLists.txt`
+   (`project(ort-server VERSION ...)`), update `VERSIONS.md`, tag it
    — the tag is the bare version, **NO leading `v`**: lemond's download URL is
    `releases/download/<pin>/ort-server-<pin>-<platform>...`, so the git tag
    must equal the version pin exactly:

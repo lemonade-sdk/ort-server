@@ -1,7 +1,7 @@
 # Bundled versions
 
 `ort-server` has its own semver. The libraries it bundles are internal build
-details recorded here (`GET /health` reports the bundled ONNX Runtime version),
+details recorded here (`GET /health` reports both versions from 0.4.0 on),
 not encoded in the `ort-server` version. See
 [docs/UPGRADING-ORT.md](docs/UPGRADING-ORT.md).
 
@@ -26,6 +26,8 @@ not encoded in the `ort-server` version. See
   cut the input to fit the token window; absent otherwise, never `false`. It is
   reported on **every** task. The encoder path keeps the head and drops the end;
   the zero-shot path keeps head and tail with `\n...\n` between them.
+- **`/health` reports `version`.** Earlier servers report none, so a client can
+  tell a backend that reports `truncated` from one that cannot.
 - **New task `zero-shot-classification`.** The label set arrives per request.
   Labels draw on the window first and are refused whole if they do not fit, so
   no label is scored from part of itself.

@@ -63,6 +63,10 @@ jobs:
           case "$V" in
             */*) echo "FAIL: version '$V' contains a slash"; exit 1 ;;
           esac
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            P=$(sed -n 's/^project(ort-server VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
+            [ "$V" = "$P" ] || { echo "FAIL: tag '$V' != CMakeLists.txt VERSION '$P'"; exit 1; }
+          fi
           echo "version=$V" >> "$GITHUB_OUTPUT"
 
       # Use the runner's default CMake (Windows ships 4.x for VS 2026 support).

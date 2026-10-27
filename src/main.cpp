@@ -1215,6 +1215,7 @@ int main(int argc, char** argv) {
         httplib::Server srv;
         srv.Get("/health", [](const httplib::Request&, httplib::Response& res) {
             res.set_content(json{{"status", "ok"},
+                                 {"version", ORT_SERVER_VERSION},
                                  {"onnxruntime", ORT_SERVER_ONNXRUNTIME_VERSION}}.dump(),
                             "application/json");
         });
