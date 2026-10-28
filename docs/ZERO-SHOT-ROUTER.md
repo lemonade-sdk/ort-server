@@ -186,8 +186,14 @@ is the useful direction.
 grows as `max_length²`. A wide-context model reaches tens of GB with both
 per-axis limits satisfied.
 
-All four are startup errors on a non-router model, in either form, as is a
-malformed flag value.
+The three label limits are startup errors on a non-router model, in either
+form, as is a malformed flag value.
+
+`--max-length` is not. On a fixed-label model it can narrow the window, but not
+widen it: a larger value is ignored, with one warning on stderr. An encoder's
+position table has a fixed size, often 512, and a window past it does not fail
+at startup. It fails inside the model, and only on a text long enough to reach
+it.
 
 Three rules are fixed, and each answers `400`: control characters in a label,
 duplicate labels, and an empty or whitespace-only label.
@@ -209,6 +215,11 @@ directory, keyed by model name with its source prefix:
 ```json
 {"builtin.LFM2.5-Encoder-350M-Prompt-Router-ONNX": {"onnxruntime_args": "--max-length 4096"}}
 ```
+
+Lemonade also adds its server-wide `onnxruntime.args` from `config.json` to
+every ONNX model it starts. There, `--max-length 4096` widens only the router,
+and `--max-length 256` narrows every model, so the fixed-label classifiers then
+report `truncated: true` on long text.
 
 ## Truncation
 

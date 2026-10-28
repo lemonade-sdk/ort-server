@@ -36,7 +36,10 @@ not encoded in the `ort-server` version. See
   `manifest.json` or on the command line, the flag winning: the window
   `max_length` / `--max-length`, and, derived from it, `max_labels` /
   `--max-labels`, `max_label_chars` / `--max-label-chars`, `max_grid_cells` /
-  `--max-grid-cells`. All four flags are startup errors on a fixed-label model.
+  `--max-grid-cells`. The three label flags are startup errors on a fixed-label
+  model. `--max-length` there can only narrow the window: a larger value is
+  ignored with a warning, since a window past the position table fails only on
+  long text, inside the model.
 - **Unknown flags are startup errors**, as is a flag missing its value. Earlier
   servers ignored both, so a misspelled limit left the default in place.
 - **New `400`s on the zero-shot path:** a control character in a label, a

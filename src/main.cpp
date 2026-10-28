@@ -134,9 +134,11 @@ constexpr const char* kUsage =
     "usage: ort-server --model-path <dir> --port <n> [--verbose]\n"
     "       [--max-length <n>] [--max-labels <n>] [--max-label-chars <n>]\n"
     "       [--max-grid-cells <n>]\n"
-    "  The four limits apply to zero-shot-classification models only. Each\n"
-    "  overrides the matching manifest.json field; omit to take the manifest's\n"
-    "  value, or the default derived from the model's token window.";
+    "  --max-length sets a zero-shot-classification model's window; on any other\n"
+    "  model it can only narrow it, and a larger value is ignored. The other three\n"
+    "  limits apply to zero-shot-classification models only. Each overrides the\n"
+    "  matching manifest.json field; omit to take the manifest's value, or the\n"
+    "  default derived from the model's token window.";
 
 Args parse_args(int argc, char** argv) {
     Args a;
@@ -526,15 +528,24 @@ Manifest load_manifest(const fs::path& dir, const json& tokenizer_json,
                      : manifest_from_hf_config(dir, tokenizer_json);
 
     // Command line beats manifest beats derived default.
-    const bool any_cli = cli.max_length > 0 || cli.max_labels > 0 ||
-                         cli.max_label_chars > 0 || cli.max_grid_cells > 0;
-    if (any_cli && !m.zero_shot()) {
+    const bool label_cli = cli.max_labels > 0 || cli.max_label_chars > 0 ||
+                           cli.max_grid_cells > 0;
+    if (label_cli && !m.zero_shot()) {
         throw std::runtime_error(
-            "--max-length / --max-labels / --max-label-chars / --max-grid-cells apply to " +
+            "--max-labels / --max-label-chars / --max-grid-cells apply to " +
             std::string(kZeroShot) + " models only; this model's task is " + m.task);
     }
     // The label limits derive from the window, so it is set first.
-    if (cli.max_length > 0) m.max_length = cli.max_length;
+    if (cli.max_length > 0) {
+        if (m.zero_shot() || cli.max_length < m.max_length) {
+            m.max_length = cli.max_length;
+        } else if (cli.max_length > m.max_length) {
+            fprintf(stderr,
+                    "ort-server: --max-length %d ignored: this %s model's window is %d "
+                    "tokens, and the flag can only narrow it\n",
+                    cli.max_length, m.task.c_str(), m.max_length);
+        }
+    }
     if (cli.max_labels > 0) m.max_labels = cli.max_labels;
     if (cli.max_label_chars > 0) m.max_label_chars = cli.max_label_chars;
     if (cli.max_grid_cells > 0) m.max_grid_cells = cli.max_grid_cells;

@@ -654,10 +654,33 @@ def main():
             st == 400 and "limit 16" in body.get("error", ""),
             f"status {st}: {body}",
         )
-    with Server(binary, clf, ["--max-length", "64"]) as s:
-        ready = s.wait_ready(timeout=10)
+    long_text = {"text": "word " * 5000}
+    with Server(binary, clf, ["--max-length", "4096"]) as s:
+        check("M2h: a wider --max-length on a fixed-label model still starts", s.wait_ready())
+        st, body = request(long_text)
+        check(
+            "M2h: ...and keeps the model's own window",
+            st == 200 and body.get("truncated") is True,
+            f"status {st}: {body}",
+        )
         out = s.stop()
-        check("M2h: --max-length on a fixed-label model is fatal", not ready, out[-200:])
+        check(
+            "M2h: ...and warns that the flag was ignored",
+            "--max-length 4096 ignored" in out,
+            out[-200:],
+        )
+    with Server(binary, clf, ["--max-length", "8"]) as s:
+        check("M2h: a narrower --max-length on a fixed-label model starts", s.wait_ready())
+        st, body = request({"text": "word " * 20})
+        check(
+            "M2h: ...and cuts a text the model's own window would fit",
+            st == 200 and body.get("truncated") is True,
+            f"status {st}: {body}",
+        )
+        st, body = request({"text": "hi"})
+        check("M2h: ...and still fits a short one", body.get("truncated") is False, str(body))
+        out = s.stop()
+        check("M2h: ...without a warning", "ignored" not in out, out[-200:])
     for bad in ("1", "0", "abc", "4294967297"):
         with Server(binary, router, ["--max-length", bad]) as s:
             ready = s.wait_ready(timeout=10)
