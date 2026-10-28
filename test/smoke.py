@@ -1,6 +1,9 @@
 """Contract smoke tests for a built/packaged ort-server binary.
 
-    python3 test/smoke.py <path-to-ort-server-binary>
+    python3 test/smoke.py <path-to-ort-server-binary> [--router-dir <dir>]
+
+--router-dir runs section R: a real router exported with
+tools/zero_shot_router/export.py, checked against test/golden/.
 
 Covers: softmax/sigmoid normalization, manifest-less config.json inference,
 token-classification max/mean aggregation, truncation, top_k, request
@@ -8,6 +11,7 @@ validation (400s), startup rejection of bad manifests, and the output-dim
 guard. Stdlib only, so it runs on any CI runner.
 """
 
+import argparse
 import json
 import re
 import shutil
@@ -157,7 +161,7 @@ def check_golden(fixture_dir, label):
     )
 
 
-def check_router_golden(fixture_dir, label):
+def check_router_golden(fixture_dir, label, golden_path=None):
     """Same oracle as check_golden, for the per-request-label task.
 
     The reference here is Lfm2BidirForSequenceRouting.route(), transcribed in
@@ -165,7 +169,8 @@ def check_router_golden(fixture_dir, label):
     from byte offsets instead of character offsets, or on the zero-filled grids
     the reference falls back to; these values do not.
     """
-    golden = json.loads((fixture_dir / "golden.json").read_text(encoding="utf-8"))
+    golden_path = golden_path or fixture_dir / "golden.json"
+    golden = json.loads(golden_path.read_text(encoding="utf-8"))
     worst = 0.0
     worst_case = ""
     for case in golden["cases"]:
@@ -193,8 +198,19 @@ def check_router_golden(fixture_dir, label):
     )
 
 
+def check_real_router(binary, router_dir):
+    golden_path = HERE / "golden" / "LFM2.5-Encoder-350M-Prompt-Router.json"
+    with Server(binary, router_dir) as s:
+        check("R: real router ready", s.wait_ready(timeout=300))
+        check_router_golden(router_dir, "R: GOLDEN real router", golden_path)
+
+
 def main():
-    binary = str(Path(sys.argv[1]).resolve())
+    ap = argparse.ArgumentParser()
+    ap.add_argument("binary")
+    ap.add_argument("--router-dir", type=Path)
+    args = ap.parse_args()
+    binary = str(Path(args.binary).resolve())
     clf = HERE / "fixtures" / "tiny-clf"
     tok = HERE / "fixtures" / "tiny-tok"
     rtok = HERE / "fixtures" / "tiny-roberta-tok"
@@ -757,6 +773,9 @@ def main():
             ready = s.wait_ready(timeout=10)
             out = s.stop()
             check(name, not ready, out[-200:])
+
+    if args.router_dir:
+        check_real_router(binary, args.router_dir)
 
     shutil.rmtree(tmp, ignore_errors=True)
     if FAILURES:

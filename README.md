@@ -93,6 +93,12 @@ own architecture allowlist, its own token budget, its own request limits and its
 own truncation rule, all described in
 **[docs/ZERO-SHOT-ROUTER.md](docs/ZERO-SHOT-ROUTER.md)**.
 
+A ready-to-serve model directory is
+[`lemonade-sdk/LFM2.5-Encoder-350M-Prompt-Router-ONNX`](https://huggingface.co/lemonade-sdk/LFM2.5-Encoder-350M-Prompt-Router-ONNX),
+converted from
+[`LiquidAI/LFM2.5-Encoder-350M-Prompt-Router`](https://huggingface.co/LiquidAI/LFM2.5-Encoder-350M-Prompt-Router)
+with `tools/zero_shot_router/export.py`.
+
 ## HTTP contract
 
 | Method | Path | Body | Response |

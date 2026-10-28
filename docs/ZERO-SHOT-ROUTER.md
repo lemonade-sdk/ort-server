@@ -15,6 +15,14 @@ Scores are softmaxed over the supplied list, so they sum to 1 before `top_k`.
 A typical use is picking which model should answer a prompt: the candidate set
 differs per deployment, so it cannot be baked in at export time.
 
+## Model
+
+[`lemonade-sdk/LFM2.5-Encoder-350M-Prompt-Router-ONNX`](https://huggingface.co/lemonade-sdk/LFM2.5-Encoder-350M-Prompt-Router-ONNX)
+is a ready-to-serve model directory. It is an ONNX export of
+[`LiquidAI/LFM2.5-Encoder-350M-Prompt-Router`](https://huggingface.co/LiquidAI/LFM2.5-Encoder-350M-Prompt-Router),
+made as in [Exporting a model](#exporting-a-model). Export it yourself only to
+pin another revision of the original.
+
 ## How it works
 
 A fixed-label classifier emits one logit per label from its head. A zero-shot
@@ -95,31 +103,28 @@ errors.
 
 ## Exporting a model
 
-The server binds four inputs and reads one output. Any export works as long as
-it keeps them:
-
-```python
-torch.onnx.export(
-    model,
-    (input_ids, attention_mask, text_pool, category_pool),
-    "model.onnx",
-    input_names=["input_ids", "attention_mask", "text_pool", "category_pool"],
-    output_names=["logits"],
-    dynamic_axes={"input_ids": {0: "b", 1: "s"},
-                  "attention_mask": {0: "b", 1: "s"},
-                  "text_pool": {0: "b", 2: "s"},
-                  "category_pool": {0: "b", 1: "r", 2: "s"},
-                  "logits": {0: "b", 1: "r"}},
-    opset_version=17,
-)
+```
+pip install torch transformers onnx onnxruntime huggingface_hub
+python tools/zero_shot_router/export.py <out_dir> --revision <commit>
+python tools/zero_shot_router/parity.py <out_dir> --revision <commit> --binary <ort-server>
 ```
 
-**Export the forward pass, not a convenience wrapper.** A checkpoint's `route()`
-helper builds the pooling grids from its own arguments, so exporting it bakes
-the example's label count into the graph. The result then serves exactly one
-label-set size. ort-server catches that at inference, when the output's last
-dimension does not match the labels supplied, but the graph is useless either
-way. Validate an export on two different label counts before shipping it.
+The script:
+
+1. Loads the checkpoint with `trust_remote_code=True`. This is **required**:
+   `Lfm2BidirForSequenceRouting` and `route()` are in the checkpoint's
+   `modeling_lfm2_bidirectional.py`, not in `transformers`. Read that file at the
+   commit you pin with `--revision`.
+2. Replaces the short-conv forward. The checkpoint's version reads its padding
+   and groups from tensor shapes. Tracing turns those into tensors, and
+   `torch.onnx.export` fails with `expected padding to be a single integer
+   value ... got padding=[]`.
+3. Exports `forward()`, not `route()`. `route()` builds the pooling grids from
+   its own arguments, so exporting it freezes the label count of the example.
+4. Compares the graph with `route()` on 16 cases with 2 to 8 labels. It stops if
+   a score differs by more than `1e-4` or a top label changes.
+5. Writes the model directory, a `manifest.json` with `max_length` (default
+   `max_position_embeddings`, or `--max-length`), and `golden.json`.
 
 **The tokenizer must be a fast one.** The pooling grids are built from character
 offsets, which a slow tokenizer does not report.
@@ -248,3 +253,15 @@ zero-filled grid changes the answer.
 labels-vs-no-labels `400`s both ways, manifest-less inference, both allowlist
 rejections, the window check, the three limits in manifest and CLI form, and
 head+tail truncation. Each section's comment says what it pins.
+
+The real model is not in CI. To check it, download it, or export it, then run
+section R:
+
+```
+huggingface-cli download lemonade-sdk/LFM2.5-Encoder-350M-Prompt-Router-ONNX --local-dir <dir>
+python test/smoke.py <binary> --router-dir <dir>
+```
+
+Section R compares the server with
+`test/golden/LFM2.5-Encoder-350M-Prompt-Router.json`: `route()` scores from
+the checkpoint at the revision the file names.
