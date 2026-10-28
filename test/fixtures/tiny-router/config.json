@@ -1,0 +1,7 @@
+{
+  "model_type": "lfm2",
+  "architectures": [
+    "Lfm2BidirForSequenceRouting"
+  ],
+  "max_position_embeddings": 128000
+}

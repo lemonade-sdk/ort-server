@@ -1,0 +1,5 @@
+{
+  "tokenizer_class": "PreTrainedTokenizerFast",
+  "bos_token": "<|startoftext|>",
+  "model_max_length": 1000000000000000019884624838656
+}

@@ -1,0 +1,41 @@
+# cargo-about: generates the license notices for every crate statically linked
+# into ort-server through this library.
+#
+#   cargo about generate --manifest-path third_party/tok_ffi/Cargo.toml \
+#     third_party/tok_ffi/about.hbs > rust-crates-NOTICES.html
+#
+# The hand-written table in THIRD_PARTY_NOTICES.md covers the four components a
+# human needs to reason about (ONNX Runtime, cpp-httplib, nlohmann/json,
+# Oniguruma). This file covers the long tail that comes in through cargo, which
+# is 80 crates and moves on every dependency bump.
+
+# Only the targets we actually ship. Without this, the notices would also list
+# UEFI and WASI crates (r-efi, wasip2, wit-bindgen) that resolve for some other
+# platform and are never compiled into any released binary. A notice file that
+# claims code we do not ship is as wrong as one that omits code we do.
+targets = [
+    "x86_64-pc-windows-msvc",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+]
+
+# Build-dependencies (proc macros, cc) run at build time and are not linked
+# into the shipped binary, so they carry no distribution obligation.
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+
+# Every license that may appear. A crate with a disjunction ("MIT OR
+# Apache-2.0") is satisfied by the first entry here that it offers, so the
+# order is the preference order. Keep this list in step with deny.toml: this
+# file decides what gets WRITTEN, deny.toml decides what is ALLOWED, and a
+# license in neither fails the build rather than shipping unnoticed.
+accepted = [
+    "Apache-2.0",
+    "MIT",
+    "BSD-2-Clause",
+    "BSL-1.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]

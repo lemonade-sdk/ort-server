@@ -1,7 +1,8 @@
 # Upgrading the ONNX Runtime version
 
 `ort-server` bundles a specific ONNX Runtime (ORT) and statically links the
-tokenizers-cpp tokenizer stack. Those are an **internal build detail**, not the
+HuggingFace tokenizer stack via `third_party/tok_ffi`. Those are an **internal
+build detail**, not the
 `ort-server` release version — `ort-server` has its own semver (see
 [VERSIONS.md](../VERSIONS.md)). This doc is the checklist for moving to a new
 ORT release. It is written so a future automated (Claude Code) session can
@@ -14,7 +15,7 @@ All live in [`CMakeLists.txt`](../CMakeLists.txt):
 ```cmake
 set(ONNXRUNTIME_VERSION "1.27.0" ...)   # ORT prebuilt release (no leading v in the value)
 set(_ort_sha256 "...")                  # per-platform SHA256 of the four ORT archives
-# tokenizers-cpp / cpp-httplib / nlohmann-json are pinned by commit SHA
+# cpp-httplib / nlohmann-json are pinned by commit SHA
 ```
 
 `ONNXRUNTIME_VERSION` templates the FetchContent download URL for the
@@ -55,11 +56,25 @@ archive contents.
    the exported ONNX graphs still produce identical label scores. If an opset
    is too old for the new ORT, re-export that model.
 
+   **If the tokenizer moved** - a `tokenizers` crate bump in
+   `third_party/tok_ffi/Cargo.toml`, a change to `tok_encode`, or a new
+   tokenizer family in the catalog - also run the tokenizer harness, which
+   compares ids *and* character offsets against HuggingFace case by case:
+   ```
+   python test/parity_tokenizer.py test/fixtures/tiny-router
+   python test/parity_tokenizer.py <catalog-model-dir> --cases <corpus.txt>
+   ```
+   It needs `transformers` and cargo, so it is a manual gate rather than a
+   release-job step. Offsets are the part to watch: ids alone still match when
+   the offsets regress from characters to bytes, and the zero-shot router
+   decides label membership from offsets alone.
+
 6. **If — and only if — a target version is a hard blocker**, step down one ORT
    minor at a time until green, and record the blocker in the release notes.
    Prefer the latest ORT.
 
-7. **Release.** Bump `ort-server`'s own version, update `VERSIONS.md`, tag it
+7. **Release.** Bump `ort-server`'s own version in `CMakeLists.txt`
+   (`project(ort-server VERSION ...)`), update `VERSIONS.md`, tag it
    — the tag is the bare version, **NO leading `v`**: lemond's download URL is
    `releases/download/<pin>/ort-server-<pin>-<platform>...`, so the git tag
    must equal the version pin exactly:

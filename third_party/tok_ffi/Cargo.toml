@@ -1,0 +1,21 @@
+[package]
+name = "tok_ffi"
+version = "0.1.0"
+edition = "2021"
+publish = false
+# Never published, but stated so that cargo-about and cargo-deny do not have to
+# guess: this crate is part of this repository and takes the top-level LICENSE.
+license = "Apache-2.0"
+
+[lib]
+# staticlib is what ort-server links. rlib is additional, not a replacement: it
+# lets `examples/dump.rs` call these same entry points from Rust, so the parity
+# harness (test/parity_tokenizer.py) measures the FFI layer this server uses
+# rather than the crate underneath it.
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
+
+[profile.release]
+opt-level = 3

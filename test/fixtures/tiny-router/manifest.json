@@ -1,0 +1,4 @@
+{
+  "task": "zero-shot-classification",
+  "max_length": 192
+}

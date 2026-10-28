@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>ort-server — Rust crate licenses</title>
+    <style>
+      body { font-family: system-ui, sans-serif; max-width: 48rem; margin: 2rem auto; padding: 0 1rem; }
+      .intro { background: #f6f8fa; border-left: 4px solid #d0d7de; padding: 0.5rem 1rem; }
+      .license-text { background: #f6f8fa; padding: 1rem; overflow-x: auto; white-space: pre-wrap; font-size: 0.85rem; }
+      .used-by { columns: 2; font-size: 0.9rem; }
+      h3 { border-bottom: 1px solid #d0d7de; padding-bottom: 0.25rem; }
+    </style>
+  </head>
+  <body>
+    <h1>Rust crate licenses</h1>
+    <div class="intro">
+      <p>
+        These crates are statically linked into the <code>ort-server</code>
+        binary through <code>third_party/tok_ffi</code>, the C ABI over the
+        HuggingFace <code>tokenizers</code> crate. This file is generated from
+        <code>Cargo.lock</code> by <code>cargo about</code>; do not edit it by
+        hand.
+      </p>
+      <p>
+        ONNX Runtime, cpp-httplib, nlohmann/json and Oniguruma are listed
+        separately in <code>THIRD_PARTY_NOTICES.md</code> and
+        <code>licenses/</code>.
+      </p>
+    </div>
+
+    <h2>Licenses used</h2>
+    <ul>
+      {{#each overview}}
+      <li><a href="#{{id}}">{{name}}</a> — {{count}} crate(s)</li>
+      {{/each}}
+    </ul>
+
+    <h2>License texts</h2>
+    {{#each licenses}}
+    <h3 id="{{id}}">{{name}}</h3>
+    <h4>Used by</h4>
+    <ul class="used-by">
+      {{#each used_by}}
+      <li>
+        <a href="{{#if crate.repository}}{{crate.repository}}{{else}}https://crates.io/crates/{{crate.name}}{{/if}}">
+          {{crate.name}} {{crate.version}}
+        </a>
+      </li>
+      {{/each}}
+    </ul>
+    <pre class="license-text">{{text}}</pre>
+    {{/each}}
+  </body>
+</html>
