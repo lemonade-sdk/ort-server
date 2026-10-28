@@ -187,7 +187,9 @@ def main() -> None:
     ap.add_argument(
         "--max-length",
         type=int,
-        help="manifest max_length; defaults to max_position_embeddings",
+        default=2048,
+        help="manifest max_length: the serving window. Memory grows with its square; "
+        "see docs/ZERO-SHOT-ROUTER.md",
     )
     args = ap.parse_args()
 
@@ -255,8 +257,7 @@ def main() -> None:
 
     for name in ("tokenizer.json", "tokenizer_config.json", "config.json"):
         shutil.copyfile(repo / name, out / name)
-    max_length = args.max_length or model.config.max_position_embeddings
-    manifest = {"task": "zero-shot-classification", "max_length": max_length}
+    manifest = {"task": "zero-shot-classification", "max_length": args.max_length}
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     (out / "golden.json").write_text(
         json.dumps(

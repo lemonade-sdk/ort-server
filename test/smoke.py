@@ -200,9 +200,25 @@ def check_router_golden(fixture_dir, label, golden_path=None):
 
 def check_real_router(binary, router_dir):
     golden_path = HERE / "golden" / "LFM2.5-Encoder-350M-Prompt-Router.json"
-    with Server(binary, router_dir) as s:
+    labels = ["code generation", "math reasoning", "creative writing", "general knowledge"]
+    # About 4,000 tokens: past the window, so only head+tail reaches the model.
+    long_code = (
+        "def merge(a, b):\n    out = []\n    while a and b:\n"
+        "        out.append(a.pop(0) if a[0] < b[0] else b.pop(0))\n"
+        "    return out + a + b\n"
+    ) * 80 + "Why does this crash on an empty list?"
+    with Server(binary, router_dir, ["--max-length", "2048"]) as s:
         check("R: real router ready", s.wait_ready(timeout=300))
         check_router_golden(router_dir, "R: GOLDEN real router", golden_path)
+        st, body = request({"text": "What is the capital of France?", "labels": labels})
+        check("R: a text that fits reports truncated: false",
+              body.get("truncated") is False, f"status {st}: {body}")
+        st, body = request({"text": long_code, "labels": labels})
+        scores = scores_of(body)
+        check("R: a text past the window is cut", body.get("truncated") is True,
+              f"status {st}: {body}")
+        check("R: the cut text still routes to code generation",
+              bool(scores) and max(scores, key=scores.get) == "code generation", str(scores))
 
 
 def main():
@@ -311,8 +327,8 @@ def main():
         )
         st, body = request({"text": "hi"})
         check(
-            "D: a fitting fixed-label request carries no flag",
-            st == 200 and "truncated" not in body,
+            "D: a fitting fixed-label request reports truncated: false",
+            st == 200 and body.get("truncated") is False,
             f"status {st}: {body}",
         )
 
@@ -621,6 +637,46 @@ def main():
     ) as s:
         check("M2f: max_grid_cells past INT_MAX still starts", s.wait_ready())
 
+    # M2h: --max-length beats the manifest's 192, and the label limits follow
+    # the new window (64 / 4 = 16 labels).
+    mid = {"text": "word " * 30, "labels": ["a", "b"]}
+    with Server(binary, router) as s:
+        check("M2h: router ready", s.wait_ready())
+        st, body = request(mid)
+        check("M2h: the text fits 192", body.get("truncated") is False, f"status {st}: {body}")
+    with Server(binary, router, ["--max-length", "64"]) as s:
+        check("M2h: router with --max-length ready", s.wait_ready())
+        st, body = request(mid)
+        check("M2h: --max-length cuts it", body.get("truncated") is True, f"status {st}: {body}")
+        st, body = request({"text": "hi", "labels": [f"l{i}" for i in range(17)]})
+        check(
+            "M2h: max_labels derives from --max-length",
+            st == 400 and "limit 16" in body.get("error", ""),
+            f"status {st}: {body}",
+        )
+    with Server(binary, clf, ["--max-length", "64"]) as s:
+        ready = s.wait_ready(timeout=10)
+        out = s.stop()
+        check("M2h: --max-length on a fixed-label model is fatal", not ready, out[-200:])
+    for bad in ("1", "0", "abc", "4294967297"):
+        with Server(binary, router, ["--max-length", bad]) as s:
+            ready = s.wait_ready(timeout=10)
+            out = s.stop()
+            check(f"M2h: --max-length {bad!r} is rejected", not ready, out[-160:])
+    # A typo must not start the model at its default window: a flag with no
+    # value, or one the server does not know, is fatal and named in the error.
+    for flags, said in (
+        (["--max-length"], "--max-length needs a value"),
+        (["--max_length", "64"], "unknown argument '--max_length'"),
+        (["--max-len", "64"], "unknown argument '--max-len'"),
+        (["--max-length", "64", "128"], "unknown argument '128'"),
+        (["--max-labels"], "--max-labels needs a value"),
+    ):
+        with Server(binary, router, flags) as s:
+            ready = s.wait_ready(timeout=10)
+            out = s.stop()
+            check(f"M2h: {' '.join(flags)!r} is rejected", not ready and said in out, out[-200:])
+
     # M2g: a label set that passes BOTH per-axis caps and still cannot fit.
     # 48 labels of 192 characters is exactly at max_labels and exactly at
     # max_label_chars on the 192-token fixture, yet it needs thousands of
@@ -679,10 +735,14 @@ def main():
             f"{scores_of(body_c)} vs {scores_of(body_b)}",
         )
 
-        # The flag must be ABSENT when nothing was cut: a flag that is always
-        # there tells a caller nothing.
+        # Always present: a caller reads an absent flag as "this server cannot
+        # report cuts", not as "nothing was cut".
         st, body = request({"text": "short", "labels": ["code", "writing"]})
-        check("M3: a text that fits has no truncated flag", "truncated" not in body, str(body))
+        check(
+            "M3: a text that fits reports truncated: false",
+            body.get("truncated") is False,
+            str(body),
+        )
         check("M3: the fitting request still answers", st == 200, f"status {st}: {body}")
 
     # M4: the cut lands between characters. Window 45 is where a token-level
@@ -759,7 +819,7 @@ def main():
         )
         check(
             "M6: the same characters typed by the user are still pooled",
-            "truncated" not in typed and not scores_close(typed, one),
+            typed.get("truncated") is False and not scores_close(typed, one),
             f"typed {scores_of(typed)} vs plain 'a' {scores_of(one)}",
         )
 

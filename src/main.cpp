@@ -99,6 +99,7 @@ void apply_zero_shot_limits(Manifest& m) {
 }
 
 struct LimitOverrides {
+    int max_length = 0;
     int max_labels = 0;
     int max_label_chars = 0;
     long long max_grid_cells = 0;
@@ -112,45 +113,58 @@ struct Args {
 };
 
 long long positive_arg(const std::string& flag, const char* raw,
-                       long long hi = std::numeric_limits<long long>::max()) {
+                       long long hi = std::numeric_limits<long long>::max(),
+                       long long lo = 1) {
     try {
         size_t used = 0;
         const std::string s(raw);
         const long long v = std::stoll(s, &used);
         if (used != s.size()) throw std::invalid_argument("trailing characters");
-        if (v < 1 || v > hi) throw std::out_of_range("out of range");
+        if (v < lo || v > hi) throw std::out_of_range("out of range");
         return v;
     } catch (const std::exception&) {
-        throw std::runtime_error(flag + " needs an integer between 1 and " +
+        throw std::runtime_error(flag + " needs an integer between " + std::to_string(lo) +
+                                 " and " +
                                  std::to_string(hi) + ", got '" +
                                  std::string(raw) + "'");
     }
 }
 
+constexpr const char* kUsage =
+    "usage: ort-server --model-path <dir> --port <n> [--verbose]\n"
+    "       [--max-length <n>] [--max-labels <n>] [--max-label-chars <n>]\n"
+    "       [--max-grid-cells <n>]\n"
+    "  The four limits apply to zero-shot-classification models only. Each\n"
+    "  overrides the matching manifest.json field; omit to take the manifest's\n"
+    "  value, or the default derived from the model's token window.";
+
 Args parse_args(int argc, char** argv) {
     Args a;
     for (int i = 1; i < argc; ++i) {
-        std::string f = argv[i];
-        if (f == "--model-path" && i + 1 < argc) a.model_path = argv[++i];
-        else if (f == "--port" && i + 1 < argc) a.port = std::stoi(argv[++i]);
+        const std::string f = argv[i];
+        // A dropped flag would start the model at its default limits, so a
+        // misspelled or valueless one is fatal rather than ignored.
+        auto value = [&]() -> const char* {
+            if (i + 1 >= argc) throw std::runtime_error(f + " needs a value\n" + kUsage);
+            return argv[++i];
+        };
+        if (f == "--model-path") a.model_path = value();
+        else if (f == "--port") a.port = static_cast<int>(positive_arg(f, value(), 65535));
         else if (f == "--verbose") a.verbose = true;
-        else if (f == "--max-labels" && i + 1 < argc)
+        else if (f == "--max-length")
+            a.limits.max_length = static_cast<int>(
+                positive_arg(f, value(), std::numeric_limits<int>::max(), 2));
+        else if (f == "--max-labels")
             a.limits.max_labels = static_cast<int>(
-                positive_arg(f, argv[++i], std::numeric_limits<int>::max()));
-        else if (f == "--max-label-chars" && i + 1 < argc)
+                positive_arg(f, value(), std::numeric_limits<int>::max()));
+        else if (f == "--max-label-chars")
             a.limits.max_label_chars = static_cast<int>(
-                positive_arg(f, argv[++i], std::numeric_limits<int>::max()));
-        else if (f == "--max-grid-cells" && i + 1 < argc)
-            a.limits.max_grid_cells = positive_arg(f, argv[++i]);
+                positive_arg(f, value(), std::numeric_limits<int>::max()));
+        else if (f == "--max-grid-cells")
+            a.limits.max_grid_cells = positive_arg(f, value());
+        else throw std::runtime_error("unknown argument '" + f + "'\n" + kUsage);
     }
-    if (a.model_path.empty() || a.port == 0) {
-        throw std::runtime_error(
-            "usage: ort-server --model-path <dir> --port <n> [--verbose]\n"
-            "       [--max-labels <n>] [--max-label-chars <n>] [--max-grid-cells <n>]\n"
-            "  The three limits apply to zero-shot-classification models only. Each\n"
-            "  overrides the matching manifest.json field; omit to take the manifest's\n"
-            "  value, or the default derived from the model's token window.");
-    }
+    if (a.model_path.empty() || a.port == 0) throw std::runtime_error(kUsage);
     return a;
 }
 
@@ -512,13 +526,15 @@ Manifest load_manifest(const fs::path& dir, const json& tokenizer_json,
                      : manifest_from_hf_config(dir, tokenizer_json);
 
     // Command line beats manifest beats derived default.
-    const bool any_cli = cli.max_labels > 0 || cli.max_label_chars > 0 ||
-                         cli.max_grid_cells > 0;
+    const bool any_cli = cli.max_length > 0 || cli.max_labels > 0 ||
+                         cli.max_label_chars > 0 || cli.max_grid_cells > 0;
     if (any_cli && !m.zero_shot()) {
         throw std::runtime_error(
-            "--max-labels / --max-label-chars / --max-grid-cells apply to " +
+            "--max-length / --max-labels / --max-label-chars / --max-grid-cells apply to " +
             std::string(kZeroShot) + " models only; this model's task is " + m.task);
     }
+    // The label limits derive from the window, so it is set first.
+    if (cli.max_length > 0) m.max_length = cli.max_length;
     if (cli.max_labels > 0) m.max_labels = cli.max_labels;
     if (cli.max_label_chars > 0) m.max_label_chars = cli.max_label_chars;
     if (cli.max_grid_cells > 0) m.max_grid_cells = cli.max_grid_cells;
@@ -847,7 +863,7 @@ private:
     }
 
     static json rank(std::vector<std::pair<std::string, float>> ranked, int top_k,
-                     bool truncated = false) {
+                     bool truncated) {
         // stable_sort so equal scores keep the caller's label order, matching
         // the reference's stable sorted(..., reverse=True).
         std::stable_sort(ranked.begin(), ranked.end(),
@@ -855,9 +871,7 @@ private:
         if (top_k > 0 && static_cast<size_t>(top_k) < ranked.size()) ranked.resize(top_k);
         json labels = json::object();
         for (auto& [label, score] : ranked) labels[label] = score;
-        json out{{"labels", labels}};
-        if (truncated) out["truncated"] = true;
-        return out;
+        return json{{"labels", labels}, {"truncated", truncated}};
     }
 
     json classify(const std::string& text, int top_k) {

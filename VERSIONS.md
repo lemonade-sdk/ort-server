@@ -22,22 +22,26 @@ not encoded in the `ort-server` version. See
 - **`/classify` contract change.** `labels` is now required for a
   `zero-shot-classification` model and rejected for any other. Both mismatches
   answer `400`.
-- **New response field `truncated`.** Present and `true` only when the server
-  cut the input to fit the token window; absent otherwise, never `false`. It is
-  reported on **every** task. The encoder path keeps the head and drops the end;
+- **New response field `truncated`.** Every `/classify` response carries it:
+  `true` when the server cut the input to fit the token window, `false` when the
+  input fitted. Earlier servers send no field, so its absence means "unknown".
+  It is reported on **every** task. The encoder path keeps the head and drops the end;
   the zero-shot path keeps head and tail with `\n...\n` between them.
 - **`/health` reports `version`.** Earlier servers report none, so a client can
   tell a backend that reports `truncated` from one that cannot.
 - **New task `zero-shot-classification`.** The label set arrives per request.
   Labels draw on the window first and are refused whole if they do not fit, so
   no label is scored from part of itself.
-- **New request limits**, each derived from `max_length`, settable in
-  `manifest.json` or on the command line, the flag winning: `max_labels` /
+- **New request limits** for `zero-shot-classification`, settable in
+  `manifest.json` or on the command line, the flag winning: the window
+  `max_length` / `--max-length`, and, derived from it, `max_labels` /
   `--max-labels`, `max_label_chars` / `--max-label-chars`, `max_grid_cells` /
-  `--max-grid-cells`. All three are startup errors on a fixed-label model.
+  `--max-grid-cells`. All four flags are startup errors on a fixed-label model.
+- **Unknown flags are startup errors**, as is a flag missing its value. Earlier
+  servers ignored both, so a misspelled limit left the default in place.
 - **New `400`s on the zero-shot path:** a control character in a label, a
   duplicate label, an empty or whitespace-only label, a label list the window
-  cannot hold, and any of the three limits exceeded.
+  cannot hold, and any of the three label limits exceeded.
 - **New tokenizer stack.** `third_party/tok_ffi` replaces `tokenizers-cpp`: a C
   ABI this repo owns over the same HuggingFace crate. It passes through the
   character offsets the zero-shot task needs. A `truncation` or `padding` block

@@ -104,20 +104,19 @@ with `tools/zero_shot_router/export.py`.
 | Method | Path | Body | Response |
 |--------|------|------|----------|
 | GET | `/health` | — | `200` when the model is loaded and ready: `{"status": "ok", "version": "<ort-server>", "onnxruntime": "<ORT>"}` |
-| POST | `/classify` | `{"text": "...", "top_k": N?, "labels": [...]?}` | `{"labels": {"<label>": <score in [0,1]>, ...}, "truncated": true?}` — `top_k` omitted or `0` returns all labels |
+| POST | `/classify` | `{"text": "...", "top_k": N?, "labels": [...]?}` | `{"labels": {"<label>": <score in [0,1]>, ...}, "truncated": <bool>}` — `top_k` omitted or `0` returns all labels |
 
 `labels` is required for a `zero-shot-classification` model and rejected for any
 other; both mismatches are a `400` rather than a silently ignored field.
 
-`truncated` appears, on any task, only when the text did not fit the token
-window. It is absent otherwise, never `false`, so a caller can test for the
-field itself. What the cut drops depends on the path: the encoder tasks keep the
-head and drop the end, while `zero-shot-classification` keeps the head and the
-tail and drops the middle.
+`truncated` is on every response, for any task: `true` when the text did not fit
+the token window and was cut, `false` when it fitted. What the cut drops
+depends on the path: the encoder tasks keep the head and drop the end, while
+`zero-shot-classification` keeps the head and the tail and drops the middle.
 
-Servers before 0.4.0 cut without reporting it, and their `/health` carries no
-`version`. A caller that must not act on a cut input should require `version`
-0.4.0 or later before it trusts an absent `truncated`.
+Servers before 0.4.0 cut without reporting it: they send no `truncated`, and
+their `/health` carries no `version`. A missing field therefore means "unknown",
+never "fitted".
 
 Future capabilities (same server, new endpoints): `POST /embed`, `POST /rerank`.
 

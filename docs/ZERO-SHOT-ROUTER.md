@@ -124,7 +124,7 @@ The script:
 4. Compares the graph with `route()` on 16 cases with 2 to 8 labels. It stops if
    a score differs by more than `1e-4` or a top label changes.
 5. Writes the model directory, a `manifest.json` with `max_length` (default
-   `max_position_embeddings`, or `--max-length`), and `golden.json`.
+   2048, or `--max-length`), and `golden.json`.
 
 **The tokenizer must be a fast one.** The pooling grids are built from character
 offsets, which a slow tokenizer does not report.
@@ -168,11 +168,13 @@ with 10 reserved for markers and text. Send fewer or shorter labels.
 
 | Manifest field | CLI flag | Default | Meaning |
 |----------------|----------|---------|---------|
+| `max_length` | `--max-length` | `truncation.max_length` in `tokenizer.json` | Token window |
 | `max_labels` | `--max-labels` | `max_length / 4` | Labels per request |
 | `max_label_chars` | `--max-label-chars` | `max_length` | Characters in one label |
 | `max_grid_cells` | `--max-grid-cells` | `33554432` (32M, = 128 MB) | Ceiling on `labels × tokens` |
 
-The first two defaults are derived, not chosen. A label costs at least 4 tokens
+The label limits derive from the window after `--max-length` applies. The first
+two label defaults are derived, not chosen. A label costs at least 4 tokens
 (`"- "`, one character, `"\n"`), so `max_length / 4` is the most any window could
 hold, and one label cannot exceed the whole window. Nothing guards their
 product, so passing both proves nothing; the token budget above is what decides.
@@ -184,7 +186,7 @@ is the useful direction.
 grows as `max_length²`. A wide-context model reaches tens of GB with both
 per-axis limits satisfied.
 
-All three are startup errors on a non-router model, in either form, as is a
+All four are startup errors on a non-router model, in either form, as is a
 malformed flag value.
 
 Three rules are fixed, and each answers `400`: control characters in a label,
@@ -198,26 +200,27 @@ case: Lemonade forwards any flag that is not `--model-path` or `--port` into
 ort-server's argv.
 
 ```
-lemonade load my-router --onnxruntime-args "--max-labels 4096"
+lemonade load LFM2.5-Encoder-350M-Prompt-Router-ONNX --onnxruntime-args "--max-length 4096"
 ```
 
 To make it stick, save it in `recipe_options.json` in the Lemonade config
 directory, keyed by model name with its source prefix:
 
 ```json
-{"user.my-router": {"onnxruntime_args": "--max-labels 4096"}}
+{"builtin.LFM2.5-Encoder-350M-Prompt-Router-ONNX": {"onnxruntime_args": "--max-length 4096"}}
 ```
 
 ## Truncation
 
-Only the text is ever cut. The response then carries one extra field:
+Only the text is ever cut. Every response says whether it was:
 
 ```
 {"labels": {...}, "truncated": true}
 ```
 
-The field is absent when the whole input fitted. It is a boolean, never `0`/`1`,
-so a score parser cannot read a stray numeric member as a label score.
+`true` means the text was cut, and `false` means it fitted. A server before
+0.4.0 sends no field, so a missing field means "unknown", not "fitted". It is
+a boolean, never `0`/`1`, so a score parser cannot read it as a label score.
 
 **The cut keeps both ends.** A long message often carries its question at the
 end, such as code pasted above *"why does this crash?"*. The text gets one third
@@ -251,7 +254,7 @@ zero-filled grid changes the answer.
 
 `test/smoke.py` sections J through N cover this task: the golden, the
 labels-vs-no-labels `400`s both ways, manifest-less inference, both allowlist
-rejections, the window check, the three limits in manifest and CLI form, and
+rejections, the window check, the four limits in manifest and CLI form, and
 head+tail truncation. Each section's comment says what it pins.
 
 The real model is not in CI. To check it, download it, or export it, then run
@@ -262,6 +265,8 @@ huggingface-cli download lemonade-sdk/LFM2.5-Encoder-350M-Prompt-Router-ONNX --l
 python test/smoke.py <binary> --router-dir <dir>
 ```
 
-Section R compares the server with
+Section R starts the server with `--max-length 2048` and compares it with
 `test/golden/LFM2.5-Encoder-350M-Prompt-Router.json`: `route()` scores from
-the checkpoint at the revision the file names.
+the checkpoint at the revision the file names. Every golden case fits the
+window. A last case is about 4,000 tokens: it must come back cut and still
+routed to its label.
